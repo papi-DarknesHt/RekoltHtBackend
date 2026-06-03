@@ -1,5 +1,5 @@
 """
-WSGI config for RekoltHtBackend project.
+WSGI config for BackendRekoltHt project.
 
 It exposes the WSGI callable as a module-level variable named ``application``.
 
@@ -11,6 +11,6 @@ import os
 
 from django.core.wsgi import get_wsgi_application
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'RekoltHtBackend.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'BackendRekoltHt.settings')
 
 application = get_wsgi_application()
