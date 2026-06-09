@@ -1,5 +1,5 @@
 import json
-from channels.generic.websocket import AsyncWebsocketConsumer
+from  channels.generic.websocket import AsyncWebsocketConsumer
 
 class GlobalConsumer(AsyncWebsocketConsumer):
     # Connection websocket
@@ -11,5 +11,4 @@ class GlobalConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_discard("global", self.channel_name)
 
     async def global_update(self, event):
-        # json.dumps returns a JSON-formatted string suitable for sending
-        await self.send(text_data=json.dumps(event["message"]))
+        await self.send(text_data = json.dump(event["message"]))

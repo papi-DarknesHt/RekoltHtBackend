@@ -3,7 +3,7 @@ from django.http import JsonResponse
 # Create your views here.
 def test_conn(request):
     return JsonResponse({
-        "message": "Bonjour test",
+        "message": "Bonjour",
         "status": "ok",
         "app": "myapp"
     })
