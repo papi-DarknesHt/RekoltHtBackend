@@ -6,5 +6,9 @@ urlpatterns = [
     path('connexion/',          views.seConnecter),
     path('deconnexion/',        views.seDeconnecter),
     path('profil/',             views.profilAfficher),
+    path('modifier-utilisateur/', views.modifierUtilisateur),
+    path('modifier-profil/',    views.modifierProfil),
     path('modifier-mdp/',       views.modifierMotDePasse),
+    path('google/connexion/',   views.google_connection),   # ← connexion
+    path('google/inscription/', views.google_inscription),
 ]

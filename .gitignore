@@ -1,0 +1,20 @@
+# Environnement
+.env
+venv/
+__pycache__/
+*.pyc
+
+# Base de données
+db.sqlite3
+
+# Fichiers médias uploadés (photos de profil, etc.)
+media/
+
+# Couverture de tests
+htmlcov/
+.coverage
+
+# IDE
+.idea/
+
+.claude/

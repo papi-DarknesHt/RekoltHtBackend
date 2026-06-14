@@ -16,8 +16,11 @@ FONCTIONNALITÉS PRINCIPALES
 1. GESTION DES UTILISATEURS
    - Inscription et création de compte
    - Authentification et connexion/déconnexion
+   - Connexion et inscription via Google (OAuth2)
    - Système de tokens d'authentification
    - Gestion des mots de passe avec hashage sécurisé (SHA256 + salt)
+   - Modification du mot de passe (avec vérification de l'ancien mot de passe)
+   - Modification des informations du compte (nom, prénom, email, téléphone)
    - Profils utilisateur avec informations personnelles et géolocalisation
    - Rôles d'utilisateurs : acheteur, vendeur, admin
 
@@ -26,7 +29,8 @@ FONCTIONNALITÉS PRINCIPALES
    - Informations personnelles (nom, prénom, email, téléphone)
    - Adresse, commune, ville et pays
    - Géolocalisation avec longitude et latitude
-   - Support des photos de profil
+   - Support des photos de profil (upload encodé en base64, exposé en URL absolue)
+   - Modification du profil (bio, adresse, commune, ville, pays, rôle, géolocalisation, photo)
    - Conversion entre rôles (acheteur ↔ vendeur)
    - Calcul de distance entre deux profils en km
 
@@ -35,12 +39,20 @@ FONCTIONNALITÉS PRINCIPALES
    - WebSocket via Django Channels
    - Système de notifications globales
    - Broadcasting de messages en temps réel
+   - Notifications automatiques (signaux) à la création/modification/suppression
+     d'un utilisateur ou d'un profil
 
 4. API REST
    - Django REST Framework pour les endpoints API
    - Authentification par tokens
    - CORS configuré pour communiquer avec React (localhost:5173)
    - Endpoints pour Registration et RekoltHt
+
+5. AUTHENTIFICATION GOOGLE (OAuth2)
+   - Connexion Google pour un compte existant (google/connexion/)
+   - Inscription Google pour créer un nouveau compte (google/inscription/)
+   - Vérification du token Google auprès de l'API userinfo de Google
+   - Création automatique du profil associé (rôle par défaut: acheteur)
 
 
 STACK TECHNOLOGIQUE
@@ -63,6 +75,15 @@ Bibliothèques Utilitaires:
   - PyYAML 6.0.3 - Traitement YAML
   - Pandas 3.0.3 - Analyse de données
   - NumPy 2.4.4 - Calculs numériques
+  - Pillow 12.2.0 - Traitement des images (photos de profil)
+  - psycopg2-binary 2.9.12 - Driver PostgreSQL (prêt pour la production)
+
+Authentification Google (OAuth2):
+  - social-auth-app-django 5.9.0 - Intégration Django de l'authentification sociale
+  - social-auth-core 4.9.1 - Coeur de l'authentification OAuth2
+  - requests 2.34.2 / requests-oauthlib 2.0.0 - Vérification des tokens auprès de Google
+  - PyJWT 2.13.0 - Décodage/validation de jetons JWT
+  - python3-openid 3.2.0, oauthlib 3.3.1, defusedxml 0.7.1 - Dépendances OAuth/OpenID
 
 Frontend (communiquant avec ce backend):
   - React (sur localhost:5173)
@@ -75,6 +96,9 @@ BackendRekoltHt/
 ├── db.sqlite3                  # Base de données SQLite (développement)
 ├── manage.py                   # Utilitaire CLI Django
 ├── requirements.txt            # Dépendances Python du projet
+├── .env                         # Variables d'environnement (secrets, non commité)
+├── .env.example                 # Modèle des variables attendues dans .env
+├── .gitignore                   # Fichiers/dossiers exclus de Git (.env, db.sqlite3, ...)
 ├── README.txt                  # Ce fichier
 │
 ├── BackendRekoltHt/           # Configuration principale du projet Django
@@ -128,6 +152,9 @@ BackendRekoltHt/
 │   └── migrations/
 │       └── __init__.py
 │
+├── media/                      # Fichiers médias uploadés (servis en DEBUG)
+│   └── photos_profil/          # Photos de profil des utilisateurs
+│
 └── htmlcov/                   # Rapports de couverture de code (à ignorer)
     └── [fichiers HTML de couverture de tests]
 
@@ -154,6 +181,21 @@ requirements.txt
   Contenu: Noms et versions des packages nécessaires
   Installation: pip install -r requirements.txt
 
+.env
+  Description: Variables d'environnement sensibles (SECRET_KEY, identifiants
+  OAuth2 Google, ...)
+  Note: Fichier non commité (voir .gitignore) — chargé au démarrage par
+  settings.py via python-dotenv (load_dotenv)
+
+.env.example
+  Description: Modèle listant les variables attendues dans .env, avec des
+  valeurs vides/placeholder
+  Utilisation: Copier en .env puis renseigner les vraies valeurs
+
+.gitignore
+  Description: Liste des fichiers/dossiers exclus du suivi Git
+  Contenu: .env, db.sqlite3, media/, __pycache__/, htmlcov/, .idea/, ...
+
 
 DOSSIER BackendRekoltHt/ (Configuration Principale)
 ────────────────────────────────────────────────────
@@ -165,6 +207,7 @@ __init__.py
 settings.py
   Description: Configuration centralisée du projet Django
   Contient:
+    - Chargement des variables d'environnement depuis .env (python-dotenv)
     - Configuration de la base de données (db.sqlite3)
     - Applications installées (Api, Registration, RekoltHt, Produits)
     - Middleware pour sécurité et traitements HTTP
@@ -172,6 +215,7 @@ settings.py
     - Paramètres REST Framework (authentification par tokens)
     - Configuration ASGI/Channels pour WebSocket
     - Configuration des templates et contextes
+    - SECRET_KEY et identifiants Google OAuth2 lus depuis .env
   Note critique: NE PAS MODIFIER en production sans mesures de sécurité
 
 urls.py
@@ -180,6 +224,10 @@ urls.py
     - /admin/ → Interface administrateur Django
     - /api/ → Endpoints API RekoltHt
     - /Registration/ → Endpoints d'authentification et inscription
+    - /auth/ → Routes d'authentification sociale (social_django / Google OAuth2)
+  Médias:
+    - En mode DEBUG, les fichiers de MEDIA_ROOT (ex: photos de profil) sont
+      servis directement via MEDIA_URL (/media/...)
   Utilité: Point d'entrée pour toutes les requêtes HTTP
 
 asgi.py
@@ -288,21 +336,61 @@ models.py
 
 views.py
   Description: Vues API pour Registration (endpoints HTTP)
-  
+
   Endpoints:
-    - sinscrire() [POST]: Crée un nouvel utilisateur
-      Paramètres: nom, prenom, email, mot_de_passe, telephone (+ optionnels)
+    - sinscrire() [POST] → /Registration/inscription/
+      Crée un nouvel utilisateur
+      Paramètres: nom, prenom, email, mot_de_passe, telephone
+                  (+ optionnels: bio, photo_profil, adresse, commune, ville,
+                   pays, role, latitude, longitude)
       Retour: Token et données utilisateur
-    
-    - seConnecter() [POST]: Authentifie l'utilisateur
+
+    - seConnecter() [POST] → /Registration/connexion/
+      Authentifie l'utilisateur
       Paramètres: email, mot_de_passe
       Retour: Token et données utilisateur
       Effet: Active l'utilisateur si inactif
-    
-    - [Autres endpoints déconnexion, etc.]
-  
-  Fonction interne:
+
+    - seDeconnecter() [POST] → /Registration/deconnexion/
+      Déconnecte l'utilisateur (nécessite le token)
+      Effet: Désactive l'utilisateur et supprime son token
+
+    - profilAfficher() [GET] → /Registration/profil/
+      Retourne les informations de l'utilisateur connecté et son profil
+      Retour: { utilisateur: {...}, profil: {...} }
+      Note: photo_profil est renvoyée en URL absolue (build_absolute_uri)
+
+    - modifierUtilisateur() [PUT] → /Registration/modifier-utilisateur/
+      Met à jour les informations du compte (nom, prenom, email, telephone)
+      Retour: utilisateur mis à jour
+      Erreur: 400 si le nouvel email existe déjà
+
+    - modifierProfil() [PUT] → /Registration/modifier-profil/
+      Met à jour le profil (bio, adresse, commune, ville, pays, role,
+      latitude, longitude, photo_profil)
+      Retour: profil mis à jour (photo_profil en URL absolue)
+
+    - modifierMotDePasse() [PUT] → /Registration/modifier-mdp/
+      Change le mot de passe après vérification de l'ancien
+      Paramètres: ancien_mot_de_passe, nouveau_mot_de_passe
+      Erreur: 401 si l'ancien mot de passe est incorrect
+
+    - google_connection() [POST] → /Registration/google/connexion/
+      Connecte un utilisateur existant via un token Google
+      Erreur: 404 si aucun compte n'est associé à l'email Google
+
+    - google_inscription() [POST] → /Registration/google/inscription/
+      Crée un nouveau compte à partir des informations Google
+      (email, nom, prénom) ; mot de passe aléatoire généré côté serveur
+
+  Fonctions internes:
+    - _get_user_from_token(request): Récupère l'utilisateur à partir du
+      header "Authorization: Token xxx" (basé sur le dict TOKENS en mémoire)
+    - _enregistrer_photo_profil(profil, photo_data): Décode une photo envoyée
+      en base64 (data URL) et l'enregistre sur le champ photo_profil
     - _serialiseUtilisateur(utilisateur): Convertit l'utilisateur en dict JSON
+    - _serialiseProfil(profil, request=None): Convertit le profil en dict JSON
+      (photo_profil en URL absolue si "request" est fourni)
 
 admin.py
   Description: Configuration de l'interface administrateur Django
@@ -320,7 +408,15 @@ tests.py
 urls.py
   Description: Routes des endpoints Registration
   Routes:
-    - /Registration/[sinscrire/seConnecter/etc./]
+    - /Registration/inscription/          [POST] → sinscrire
+    - /Registration/connexion/             [POST] → seConnecter
+    - /Registration/deconnexion/           [POST] → seDeconnecter
+    - /Registration/profil/                [GET]  → profilAfficher
+    - /Registration/modifier-utilisateur/  [PUT]  → modifierUtilisateur
+    - /Registration/modifier-profil/       [PUT]  → modifierProfil
+    - /Registration/modifier-mdp/          [PUT]  → modifierMotDePasse
+    - /Registration/google/connexion/      [POST] → google_connection
+    - /Registration/google/inscription/    [POST] → google_inscription
 
 migrations/
   Description: Migrations de base de données
@@ -412,16 +508,32 @@ APPLICATIONS INSTALLÉES:
   - RekoltHt: Annonces
   - Produits: Produits
   - Registration: Authentification
+  - social_django: Authentification sociale (Google OAuth2)
 
 CORS (Cross-Origin Resource Sharing):
   - Origin autorisée: http://localhost:5173 (React)
   - Credentials: Autorisé
-  - Headers: accept, authorization, content-type, x-csrftoken
+  - Méthodes: GET, POST, PUT, PATCH, DELETE, OPTIONS
+  - Headers: accept, authorization, content-type, origin, x-csrftoken,
+    x-requested-with
   - CSRF trusted origins: http://localhost:5173
 
 AUTHENTIFICATION API:
-  - Type: Token Authentication
+  - Type: Token Authentication (table TOKENS en mémoire, header
+    "Authorization: Token <token>")
   - Permission par défaut: IsAuthenticated (endpoints protégés)
+
+AUTHENTIFICATION GOOGLE (OAuth2):
+  - AUTHENTICATION_BACKENDS: social_core.backends.google.GoogleOAuth2
+  - SOCIAL_AUTH_GOOGLE_OAUTH2_KEY / SECRET: identifiants client OAuth2 Google
+  - SOCIAL_AUTH_GOOGLE_OAUTH2_SCOPE: openid, email, profile
+  - SECURE_CROSS_ORIGIN_OPENER_POLICY: None (nécessaire pour la popup Google)
+  - Route: /auth/ (social_django.urls)
+
+FICHIERS MÉDIAS (photos de profil):
+  - MEDIA_URL: /media/
+  - MEDIA_ROOT: BASE_DIR / media
+  - Servis automatiquement par Django uniquement si DEBUG = True
 
 WEBSOCKET:
   - Backend: InMemoryChannelLayer (à remplacer par Redis en production)
@@ -482,8 +594,95 @@ FLUX D'AUTHENTIFICATION
 
 3. AUTHENTIFICATION REQUÊTES:
    Header: Authorization: Token abc123def456...
-   
+
    Les endpoints protégés vérifieront ce token via le middleware
+
+4. AFFICHER LE PROFIL:
+   GET /Registration/profil/
+   Header: Authorization: Token abc123def456...
+
+   Réponse (200):
+   {
+     "utilisateur": { "id": 1, "nom": "Dupont", "prenom": "Jean", ... },
+     "profil": {
+       "id": 1, "bio": "...", "photo_profil": "http://localhost:8000/media/photos_profil/xxx.jpg",
+       "adresse": "...", "commune": "...", "ville": "...", "pays": "Haiti",
+       "longitude": null, "latitude": null, "date_maj": "...", "role": "acheteur"
+     }
+   }
+
+5. MODIFIER LES INFORMATIONS DU COMPTE:
+   PUT /Registration/modifier-utilisateur/
+   Header: Authorization: Token abc123def456...
+   {
+     "nom": "Dupont",
+     "prenom": "Jean",
+     "email": "jean.nouveau@example.com",
+     "telephone": "+509xxxxxxxx"
+   }
+
+   Réponse (200):
+   {
+     "message": "Utilisateur mis à jour avec succès",
+     "utilisateur": { ... }
+   }
+   Erreur (400): si le nouvel email existe déjà chez un autre utilisateur
+
+6. MODIFIER LE PROFIL:
+   PUT /Registration/modifier-profil/
+   Header: Authorization: Token abc123def456...
+   {
+     "bio": "Producteur de riz",
+     "adresse": "Rue de la Paix",
+     "commune": "...",
+     "ville": "Port-au-Prince",
+     "pays": "Haiti",
+     "role": "vendeur",
+     "latitude": 19.45,
+     "longitude": -72.68,
+     "photo_profil": {
+       "filename": "avatar.jpg",
+       "content": "data:image/jpeg;base64,/9j/4AAQSk..."
+     }
+   }
+
+   Réponse (200):
+   {
+     "message": "Profil mis à jour avec succès",
+     "profil": { ..., "photo_profil": "http://localhost:8000/media/photos_profil/avatar.jpg" }
+   }
+   Note: tous les champs sont optionnels, seuls ceux fournis sont mis à jour.
+   La photo est décodée depuis le base64 et enregistrée dans media/photos_profil/.
+
+7. MODIFIER LE MOT DE PASSE:
+   PUT /Registration/modifier-mdp/
+   Header: Authorization: Token abc123def456...
+   {
+     "ancien_mot_de_passe": "AncienPass123",
+     "nouveau_mot_de_passe": "NouveauPass456"
+   }
+
+   Réponse (200):
+   { "message": "Mot de passe modifié avec succès" }
+   Erreur (401): si l'ancien mot de passe est incorrect
+
+8. CONNEXION / INSCRIPTION VIA GOOGLE:
+   POST /Registration/google/connexion/
+   { "token": "<id_token Google>" }
+   - Recherche un utilisateur existant avec l'email Google
+   - Erreur (404) si aucun compte n'existe pour cet email
+
+   POST /Registration/google/inscription/
+   { "token": "<id_token Google>", "role": "acheteur" }
+   - Crée un nouvel utilisateur (nom/prénom/email depuis Google)
+   - Erreur (400) si un compte existe déjà pour cet email
+
+   Réponse (200/201) pour les deux:
+   {
+     "message": "...",
+     "token": "abc123def456...",
+     "utilisateur": { ... }
+   }
 
 
 TECHNOLOGIE WEBSOCKET
@@ -509,18 +708,23 @@ DÉMARRAGE DU PROJET
 1. INSTALLATION:
    pip install -r requirements.txt
 
-2. MIGRATIONS:
+2. VARIABLES D'ENVIRONNEMENT:
+   Copier .env.example vers .env et renseigner les valeurs réelles
+   (SECRET_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET)
+   cp .env.example .env
+
+3. MIGRATIONS:
    python manage.py migrate
 
-3. CRÉER UN SUPER-UTILISATEUR (optionnel):
+4. CRÉER UN SUPER-UTILISATEUR (optionnel):
    python manage.py createsuperuser
 
-4. SERVEUR DÉVELOPPEMENT:
+5. SERVEUR DÉVELOPPEMENT:
    avec support WebSocket (asynchrone):
-   uvicorn BackendRekoltHt.asgi:application --reload
+   uvicorn BackendRekoltHt.asgi:application --port 8000 --reload
    Serveur ASGI: http://localhost:8000/
 
-5. ACCÈS ADMIN:
+6. ACCÈS ADMIN:
    http://localhost:8000/admin/
 
 
@@ -558,11 +762,15 @@ Documentation Django: https://docs.djangoproject.com/
 Django REST Framework: https://www.django-rest-framework.org/
 Django Channels: https://channels.readthedocs.io/
 Géographie/Distance: https://geopy.readthedocs.io/
+Authentification sociale: https://python-social-auth.readthedocs.io/
 
 
 ================================================================================
                             FIN DU README
 ================================================================================
 Créé pour: Projet BackendRekoltHt
-Version: 1.0
+Version: 1.1
 Date: 2026
+Mise à jour: Ajout des endpoints de gestion du profil (affichage, modification
+des informations utilisateur/profil, changement de mot de passe, upload de
+photo de profil) et de l'authentification Google OAuth2.

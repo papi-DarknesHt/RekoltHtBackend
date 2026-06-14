@@ -10,17 +10,22 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# charge les variables du fichier .env (clés secrètes, identifiants OAuth, ...)
+load_dotenv(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-(oo&i=gt9nv@!dux%%568cbpm3@hi==w3%z)%uhg(q!w@kj&hb'
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-(oo&i=gt9nv@!dux%%568cbpm3@hi==w3%z)%uhg(q!w@kj&hb')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -44,8 +49,9 @@ INSTALLED_APPS = [
     'RekoltHt',
     'Produits',
     'Registration',
+    'social_django',
 ]
-
+# ne pas toucher
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
@@ -59,12 +65,17 @@ MIDDLEWARE = [
 # autoriser la communication entre react et django
 CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = [
+    "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"
+]
 # autorisere les entete dans les requete
 CORS_ALLOW_HEADERS = [
-    'accept',
-    'authorization',
-    'content-type',
-    'x-csrftoken',
+    "accept",
+    "authorization",
+    "content-type",
+    "origin",
+    "x-csrftoken",
+    "x-requested-with",
 ]
 # autorise les requete post avec CSRF
 CSRF_TRUSTED_ORIGINS = ["http://localhost:5173"]
@@ -83,6 +94,21 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
 }
 ROOT_URLCONF = 'BackendRekoltHt.urls'
+
+# Google OAuth
+AUTHENTICATION_BACKENDS = [
+    'social_core.backends.google.GoogleOAuth2',
+]
+SECURE_CROSS_ORIGIN_OPENER_POLICY = None
+
+SOCIAL_AUTH_GOOGLE_OAUTH2_KEY    = os.getenv('SOCIAL_AUTH_GOOGLE_OAUTH2_KEY')
+SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = os.getenv('SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET')
+
+SOCIAL_AUTH_GOOGLE_OAUTH2_SCOPE = [
+    'openid',
+    'email',
+    'profile',
+]
 
 
 TEMPLATES = [
@@ -149,3 +175,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Fichiers médias (photos de profil, etc.)
+MEDIA_URL  = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
