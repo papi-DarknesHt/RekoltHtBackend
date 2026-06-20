@@ -34,6 +34,209 @@ FONCTIONNALITÉS PRINCIPALES
    - Conversion entre rôles (acheteur ↔ vendeur)
    - Calcul de distance entre deux profils en km
 
+FONCTIONNALITÉS SUPPLÉMENTAIRES : SYSTÈME DE VENDEURS ET ENTREPRISES
+================================================================================
+
+1. INSCRIPTION EN TANT QU'ENTREPRISE (ACHETEUR)
+────────────────────────────────────────────────
+
+Un utilisateur peut s'inscrire directement comme "entreprise" lors de
+l'inscription initiale. Son compte reste `role = "acheteur"` (une entreprise-
+acheteuse n'est pas automatiquement vendeuse), mais `type_vendeur = "entreprise"`
+et un objet `Entreprise` est créé immédiatement avec le même processus de
+vérification que celui utilisé pour les vendeurs.
+
+Avantages:
+- Un seul système de vérification d'entreprise pour achat ET vente
+- Si cette entreprise décide plus tard de devenir vendeur via `devenirVendeur`,
+  le système reconnaît l'`Entreprise` déjà existante et ne redemande pas de
+  document si aucun nouveau document n'est fourni.
+
+Implémentation (backend)
+------------------------
+- Nouvelle méthode `Profil.creer_compte_entreprise(nom_entreprise, nouveau_fichier)`
+  qui crée l'objet `Entreprise` au moment de l'inscription sans modifier `role`.
+  Contrairement à `soumettre_demande_vendeur`, elle ne touche jamais au champ
+  `role` — le rôle reste "acheteur" jusqu'à un appel explicite à
+  `devenirVendeur`.
+
+- Endpoint `sinscrire` [POST /Registration/inscription/] accepte optionnellement
+  les champs:
+  - `type_vendeur` : "individu" | "entreprise"
+  - `nom_entreprise` : obligatoire si `type_vendeur == "entreprise"`
+  - `piece_justificative` : obligatoire si `type_vendeur == "entreprise"`
+
+- Pré-validation stricte: la pièce justificative est validée AVANT création
+  de l'Utilisateur pour éviter les comptes orphelins en cas d'erreur.
+
+- La réponse d'inscription inclut désormais la clé `profil` avec les détails
+  `type_vendeur`, `nom_entreprise`, `statut_verification` immédiatement après
+  l'inscription, sans appel API supplémentaire.
+
+Exemple de requête:
+  POST /Registration/inscription/
+  {
+    "nom": "Dupont",
+    "prenom": "Jean",
+    "email": "jean@example.com",
+    "mot_de_passe": "SecurePassword123",
+    "telephone": "+509xxxxxxxx",
+    "type_vendeur": "entreprise",
+    "nom_entreprise": "Ferme Lakou Vert",
+    "piece_justificative": {
+      "content": "data:application/pdf;base64,JVBERi0xLjQK...",
+      "filename": "patente.pdf"
+    }
+  }
+
+Réponse (201):
+  {
+    "message": "Utilisateur inscrit avec succès",
+    "token": "abc123def456...",
+    "utilisateur": { ... },
+    "profil": {
+      "id": 1,
+      "role": "acheteur",
+      "type_vendeur": "entreprise",
+      "nom_entreprise": "Ferme Lakou Vert",
+      "statut_verification": "en_attente",
+      "piece_justificative": "http://localhost:8000/media/pieces_justificatives/patente.pdf",
+      ...
+    }
+  }
+
+Règles de validation:
+- Si `type_vendeur` absent du corps: comportement standard (compte individuel)
+- Si `type_vendeur = "individu"`: fixe `profil.type_vendeur`, pas de création
+  d'objet `Entreprise`
+- Si `type_vendeur = "entreprise"`:
+  - `nom_entreprise` obligatoire → 400 sinon
+  - `piece_justificative` obligatoire → 400 sinon
+  - Validation d'extension (.pdf, .jpg, .jpeg, .png) → 400 sinon
+  - Validation de taille (≤ 5 Mo après décodage) → 400 sinon
+  - Aucun utilisateur n'est créé si la validation échoue
+
+Tests ajoutés:
+- Inscription sans `type_vendeur` → compte individuel normal, aucun `Entreprise` créé
+- Inscription avec `type_vendeur = "individu"` → fixe `profil.type_vendeur`
+- Inscription avec `type_vendeur = "entreprise"` + tous les champs → crée
+  l'objet `Entreprise` avec `statut_verification = "en_attente"`
+- Inscription avec `type_vendeur = "entreprise"` sans `nom_entreprise` → 400,
+  aucun utilisateur créé
+- Inscription avec `type_vendeur = "entreprise"` sans pièce justificative → 400,
+  aucun utilisateur créé
+- Inscription avec pièce justificative à extension invalide → 400, aucun
+  utilisateur créé
+- Scénario end-to-end: s'inscrire en tant qu'entreprise, puis appeler
+  `devenirVendeur` sans nouveau document → role devient "vendeur", le même
+  objet `Entreprise` est réutilisé (pas de duplication)
+
+
+2. DEVENIR VENDEUR (APRÈS L'INSCRIPTION)
+────────────────────────────────────────
+
+Cette fonctionnalité permet à un utilisateur connecté de demander le passage
+au rôle "vendeur" en choisissant un type : "individu" ou "entreprise".
+
+- Type "individu" : aucun document requis — le profil devient vendeur et le
+  statut de vérification est marqué "valide" immédiatement.
+- Type "entreprise" : requiert le nom de l'entreprise et une pièce justificative
+  (patente, certificat d'immatriculation, etc.). Lors de la première soumission
+  la pièce est obligatoire et le statut passe à "en_attente" jusqu'à
+  vérification manuelle par un administrateur. Lors d'une mise à jour, si un
+  nouveau document est envoyé l'ancien est supprimé et le statut repasse à
+  "en_attente" ; si seul le nom de l'entreprise change, le document et le
+  statut existants restent inchangés.
+
+Implémentation (backend)
+------------------------
+- Champs ajoutés au modèle `Profil` :
+  - `type_vendeur` (CharField : "individu" | "entreprise")
+  - `nom_entreprise` (CharField)
+  - `piece_justificative` (FileField upload_to='pieces_justificatives/')
+  - `statut_verification` (CharField : 'non_requis' | 'en_attente' | 'valide' | 'rejete')
+
+- Nouvelle méthode serveur `Profil.soumettre_demande_vendeur(...)` qui applique
+  la logique métier (suppression d'ancien fichier lors du remplacement,
+  mise à jour du statut, assignation du rôle côté serveur).
+
+- Endpoint HTTP ajouté : `POST /Registration/devenir-vendeur/` — authentification
+  via header `Authorization: Token xxx` (mécanisme de token existant).
+
+Validation des pièces justificatives
+------------------------------------
+- Formats autorisés : `.pdf`, `.jpg`, `.jpeg`, `.png` (vérification insensible
+  à la casse sur le nom du fichier fourni).
+- Taille maximale : 5 Mo après décodage base64 (attention : chaîne base64 plus
+  volumineuse dans le JSON). Le projet définit désormais
+  `DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024` dans `settings.py` pour
+  permettre l'envoi de fichiers encodés en base64.
+
+Confidentialité et accès aux documents
+-------------------------------------
+- Les pièces justificatives sont des données sensibles. Le sérialiseur de
+  profil n'inclut l'URL de `piece_justificative` QUE si la requête est faite par
+  le propriétaire du profil ou par un compte admin. Cela évite qu'un futur
+  endpoint public n'expose accidentellement ces documents.
+- Remarque : servir les fichiers via `MEDIA_URL` avec accès direct expose
+  l'URL si elle est connue. Pour une sécurité renforcée, prévoir une vue
+  dédiée qui vérifie l'authentification avant de streamer le fichier (tâche
+  recommandée mais non implémentée ici).
+
+Administration
+--------------
+- L'interface d'administration (`Registration/admin.py`) affiche désormais
+  `type_vendeur` et `statut_verification` et permet le filtrage par ces champs
+  pour faciliter la validation manuelle des demandes "entreprise".
+
+Tests
+-----
+- Des tests unitaires ont été ajoutés (`Registration/tests.py`) couvrant :
+  - soumission individu et entreprise
+  - validations d'extension et de taille
+  - remplacement de document (ancienne pièce supprimée)
+  - protection contre la tentative de définition directe de `statut_verification`
+
+Migration
+---------
+Après pull, exécuter :
+
+```powershell
+python manage.py makemigrations Registration
+python manage.py migrate
+```
+
+Ces commandes ajoutent les nouveaux champs au modèle `Profil`.
+
+Fichiers modifiés / ajoutés
+---------------------------
+- `Registration/models.py` :
+  - Nouveaux champs + méthode `soumettre_demande_vendeur` (pour devenirVendeur)
+  - Nouvelle méthode `creer_compte_entreprise` (pour inscription entreprise)
+  - Propriétés proxy pour compatibilité (nom_entreprise, piece_justificative, statut_verification)
+- `Registration/entreprise.py` : nouveau modèle `Entreprise` (OneToOne vers Profil)
+- `Registration/views.py`  :
+  - Endpoint `devenirVendeur`, validation base64
+  - Modification de `sinscrire` : pré-validation `type_vendeur`, appel à `creer_compte_entreprise`
+  - Ajout du champ `profil` dans la réponse d'inscription
+  - Fonction `_valider_et_preparer_piece` pour validation des fichiers base64
+  - Fonction `_serialiseProfil` mise à jour pour gérer la confidentialité des documents
+- `Registration/urls.py`   : route `devenir-vendeur/`
+- `Registration/admin.py`   : affichage et filtres admin pour Entreprise et Profil
+- `Registration/tests.py`   :
+  - Tests unitaires pour `devenirVendeur` (individu, entreprise, validations)
+  - Tests pour l'inscription entreprise (success, erreurs de validation, reuse scenario)
+- `BackendRekoltHt/settings.py` : `DATA_UPLOAD_MAX_MEMORY_SIZE` augmenté à 10 MB
+- Migrations : création et application des migrations pour Entreprise et modifications Profil
+
+Notes de sécurité supplémentaires
+--------------------------------
+- Ne pas accepter `role` ni `statut_verification` depuis le client ; ces
+  valeurs sont recalculées côté serveur.
+- Considérer à terme une stratégie de stockage sécurisé (S3 privé + URL
+  signées) et l'utilisation d'un système d'authentification persistant pour
+  les tokens (actuellement `TOKENS` est en mémoire).
+
 
 3. COMMUNICATION EN TEMPS RÉEL
    - WebSocket via Django Channels
@@ -339,11 +542,15 @@ views.py
 
   Endpoints:
     - sinscrire() [POST] → /Registration/inscription/
-      Crée un nouvel utilisateur
-      Paramètres: nom, prenom, email, mot_de_passe, telephone
-                  (+ optionnels: bio, photo_profil, adresse, commune, ville,
-                   pays, role, latitude, longitude)
-      Retour: Token et données utilisateur
+      Crée un nouvel utilisateur avec option d'inscription en tant qu'entreprise
+      Paramètres obligatoires: nom, prenom, email, mot_de_passe, telephone
+      Paramètres optionnels: bio, photo_profil, adresse, commune, ville,
+                             pays, role, latitude, longitude
+      Paramètres optionnels pour entreprise:
+                             type_vendeur (individu|entreprise),
+                             nom_entreprise, piece_justificative
+      Retour: Token, données utilisateur, et profil sérialisé (incluant type_vendeur,
+              nom_entreprise, statut_verification si applicable)
 
     - seConnecter() [POST] → /Registration/connexion/
       Authentifie l'utilisateur
@@ -543,12 +750,20 @@ BASE DE DONNÉES:
   - Engine: sqlite3
   - Name: db.sqlite3
 
+UPLOAD DE FICHIERS (Pièces justificatives et médias):
+  - DATA_UPLOAD_MAX_MEMORY_SIZE: 10 * 1024 * 1024 (10 MB)
+  - Permet l'envoi de fichiers encodés en base64 jusqu'à ~7.5 Mo via JSON
+  - Extensions acceptées: .pdf, .jpg, .jpeg, .png
+  - Taille max après décodage: 5 MB
+
 
 FLUX D'AUTHENTIFICATION
 ================================================================================
 
-1. INSCRIPTION:
-   POST /Registration/sinscrire/
+1. INSCRIPTION (COMPTE INDIVIDUEL OU ENTREPRISE):
+   POST /Registration/inscription/
+
+   Exemple A - Inscription individuelle (comportement standard):
    {
      "nom": "Dupont",
      "prenom": "Jean",
@@ -563,17 +778,52 @@ FLUX D'AUTHENTIFICATION
    {
      "message": "Utilisateur inscrit avec succès",
      "token": "abc123def456...",
-     "utilisateur": { ... }
+     "utilisateur": { ... },
+     "profil": {
+       "id": 1, "role": "acheteur", "type_vendeur": null,
+       "nom_entreprise": null, "statut_verification": "non_requis",
+       "piece_justificative": null, ...
+     }
+   }
+
+   Exemple B - Inscription en tant qu'entreprise:
+   {
+     "nom": "Dupont",
+     "prenom": "Jean",
+     "email": "jean@example.com",
+     "mot_de_passe": "SecurePassword123",
+     "telephone": "+509xxxxxxxx",
+     "type_vendeur": "entreprise",
+     "nom_entreprise": "Ferme Lakou Vert",
+     "piece_justificative": {
+       "content": "data:application/pdf;base64,JVBERi0xLjQK...",
+       "filename": "patente.pdf"
+     }
+   }
+
+   Réponse (201):
+   {
+     "message": "Utilisateur inscrit avec succès",
+     "token": "abc123def456...",
+     "utilisateur": { ... },
+     "profil": {
+       "id": 1, "role": "acheteur", "type_vendeur": "entreprise",
+       "nom_entreprise": "Ferme Lakou Vert", "statut_verification": "en_attente",
+       "piece_justificative": "http://localhost:8000/media/pieces_justificatives/patente.pdf",
+       ...
+     }
    }
    
    Côté système:
    - Hash du mot de passe avec salt aléatoire
+   - Pré-validation du `type_vendeur` et du fichier AVANT création Utilisateur
    - Création de Utilisateur
    - Signal crée Profil automatiquement
+   - Si `type_vendeur = "entreprise"`, création de l'objet Entreprise avec le fichier
    - Génération d'un token d'authentification
 
 2. CONNEXION:
-   POST /Registration/seConnecter/
+   POST /Registration/connexion/
    {
      "email": "jean@example.com",
      "mot_de_passe": "SecurePassword123"
@@ -607,7 +857,8 @@ FLUX D'AUTHENTIFICATION
      "profil": {
        "id": 1, "bio": "...", "photo_profil": "http://localhost:8000/media/photos_profil/xxx.jpg",
        "adresse": "...", "commune": "...", "ville": "...", "pays": "Haiti",
-       "longitude": null, "latitude": null, "date_maj": "...", "role": "acheteur"
+       "longitude": null, "latitude": null, "date_maj": "...", "role": "acheteur",
+       "type_vendeur": null, "nom_entreprise": null, "statut_verification": "non_requis"
      }
    }
 
@@ -654,7 +905,32 @@ FLUX D'AUTHENTIFICATION
    Note: tous les champs sont optionnels, seuls ceux fournis sont mis à jour.
    La photo est décodée depuis le base64 et enregistrée dans media/photos_profil/.
 
-7. MODIFIER LE MOT DE PASSE:
+7. DEVENIR VENDEUR (Après inscription):
+   POST /Registration/devenir-vendeur/
+   Header: Authorization: Token abc123def456...
+   {
+     "type_vendeur": "entreprise",
+     "nom_entreprise": "Ferme Lakou Vert",
+     "piece_justificative": {
+       "content": "data:application/pdf;base64,JVBERi0xLjQK...",
+       "filename": "patente.pdf"
+     }
+   }
+
+   Réponse (200):
+   {
+     "message": "Demande vendeur entreprise soumise",
+     "profil": {
+       "id": 1, "role": "vendeur", "type_vendeur": "entreprise",
+       "nom_entreprise": "Ferme Lakou Vert", "statut_verification": "en_attente", ...
+     }
+   }
+
+   Note: Si l'utilisateur s'était déjà inscrit comme entreprise et appelle
+   devenirVendeur sans nouveau document, le même objet Entreprise est réutilisé
+   et le role passe juste à "vendeur".
+
+8. MODIFIER LE MOT DE PASSE:
    PUT /Registration/modifier-mdp/
    Header: Authorization: Token abc123def456...
    {
@@ -666,7 +942,7 @@ FLUX D'AUTHENTIFICATION
    { "message": "Mot de passe modifié avec succès" }
    Erreur (401): si l'ancien mot de passe est incorrect
 
-8. CONNEXION / INSCRIPTION VIA GOOGLE:
+9. CONNEXION / INSCRIPTION VIA GOOGLE:
    POST /Registration/google/connexion/
    { "token": "<id_token Google>" }
    - Recherche un utilisateur existant avec l'email Google
