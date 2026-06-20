@@ -78,7 +78,7 @@ CORS_ALLOW_HEADERS = [
     "x-requested-with",
 ]
 # autorise les requete post avec CSRF
-CSRF_TRUSTED_ORIGINS = ["http://localhost:5173"]
+CSRF_TRUSTED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com/"]
 
 # ASGI ET WebSocket
 ASGI_APPLICATION = 'BackendRekoltHt.asgi.application'
