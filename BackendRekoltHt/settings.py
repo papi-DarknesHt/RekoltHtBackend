@@ -179,7 +179,3 @@ STATIC_URL = 'static/'
 # Fichiers médias (photos de profil, etc.)
 MEDIA_URL  = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-
-# Autoriser des uploads plus volumineux (ex: fichier base64 ~6-7Mo pour un document de 5Mo)
-DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 MB
-
