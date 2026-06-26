@@ -21,4 +21,7 @@ htmlcov/
 __pycache__/
 *.pyc
 *.pyo
+Api/__pycache__/consumers.cpython-314.pyc
+BackendRekoltHt/__pycache__/settings.cpython-314.pyc
+Registration/__pycache__/models.cpython-314.pyc
 BackendRekoltHt/__pycache__/settings.cpython-314.pyc
