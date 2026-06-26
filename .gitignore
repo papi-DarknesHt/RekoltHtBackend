@@ -21,3 +21,4 @@ htmlcov/
 __pycache__/
 *.pyc
 *.pyo
+BackendRekoltHt/__pycache__/settings.cpython-314.pyc
