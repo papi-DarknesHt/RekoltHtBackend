@@ -6,7 +6,7 @@ from django.core.files.base import ContentFile
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.db import IntegrityError
-from .models import Utilisateur, Profil,  haser_password, verifier_password
+from .models import Utilisateur, Profil, Entreprise, haser_password, verifier_password
 
 
 # Dictionnaire en mémoire pour stocker les tokens
@@ -350,6 +350,261 @@ def modifierMotDePasse(request):
     return JsonResponse({'message': 'Mot de passe modifié avec succès'}, status=200)
 
 
+# ── ENTREPRISE — VÉRIFIER (avant inscription, sans authentification) ─────────
+@csrf_exempt
+def verifierEntreprise(request):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    nom_Entreprise     = request.GET.get('nom_Entreprise', '').strip()
+    num_Enregistrement = request.GET.get('num_Enregistrement', '').strip()
+
+    if not nom_Entreprise or not num_Enregistrement:
+        return JsonResponse({'error': 'Le nom et le numéro d\'enregistrement sont requis'}, status=400)
+
+    existe_combo = Entreprise.objects.filter(
+        nom_Entreprise=nom_Entreprise,
+        num_Enregistrement=num_Enregistrement,
+    ).exists()
+    existe_nom = Entreprise.objects.filter(nom_Entreprise=nom_Entreprise).exists()
+    existe_num = Entreprise.objects.filter(num_Enregistrement=num_Enregistrement).exists()
+
+    if existe_combo:
+        message = "Cette entreprise existe déjà"
+    elif existe_nom:
+        message = "Le nom de l'entreprise existe déjà"
+    elif existe_num:
+        message = "Le numéro d'enregistrement existe déjà"
+    else:
+        message = None
+
+    return JsonResponse({
+        'existe':  bool(existe_combo or existe_nom or existe_num),
+        'message': message,
+    }, status=200)
+
+
+# ── ENTREPRISE — CRÉER ────────────────────────────────────────────────────────
+@csrf_exempt
+def creerEntreprise(request):
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    # vérifier les champs obligatoires
+    for field in ['nom_Entreprise', 'num_Enregistrement']:
+        if field not in data:
+            return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
+
+    # vérifier si cette entreprise (même nom + même numéro) existe déjà
+    if Entreprise.objects.filter(
+        nom_Entreprise=data['nom_Entreprise'],
+        num_Enregistrement=data['num_Enregistrement'],
+    ).exists():
+        return JsonResponse({'error': "Cette entreprise existe déjà"}, status=400)
+
+    # vérifier si le nom ou le numéro d'enregistrement existe déjà séparément
+    if Entreprise.objects.filter(nom_Entreprise=data['nom_Entreprise']).exists():
+        return JsonResponse({'error': "Le nom de l'entreprise existe déjà"}, status=400)
+    if Entreprise.objects.filter(num_Enregistrement=data['num_Enregistrement']).exists():
+        return JsonResponse({'error': "Le numéro d'enregistrement existe déjà"}, status=400)
+
+    entreprise = Entreprise.objects.create(
+        proprietaire       = utilisateur,
+        nom_Entreprise     = data['nom_Entreprise'],
+        num_Enregistrement = data['num_Enregistrement'],
+        secteur             = data.get('secteur',     'agriculture'),
+        description         = data.get('description', ''),
+        email               = data.get('email',       ''),
+        telephone           = data.get('telephone',   ''),
+        adresse             = data.get('adresse',     ''),
+        commune             = data.get('commune',     ''),
+        pays                = data.get('pays',        'Haiti'),
+        longitude           = data.get('longitude',   None),
+        latitude            = data.get('latitude',    None),
+    )
+
+    _enregistrer_logo_entreprise(entreprise, data.get('logo'))
+    entreprise.save()
+
+    return JsonResponse({
+        'message':    'Entreprise créée avec succès',
+        'entreprise': _serialiseEntreprise(entreprise, request),
+    }, status=201)
+
+
+# ── ENTREPRISE — LISTER ───────────────────────────────────────────────────────
+@csrf_exempt
+def listerEntreprises(request):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    # un admin voit toutes les entreprises créées, un utilisateur normal ne voit que les siennes
+    if utilisateur.profil.role == 'admin':
+        entreprises = Entreprise.objects.all()
+    else:
+        entreprises = utilisateur.entreprises.all()
+
+    return JsonResponse({
+        'entreprises': [_serialiseEntreprise(e, request) for e in entreprises],
+    }, status=200)
+
+
+# ── ENTREPRISE — MODIFIER ─────────────────────────────────────────────────────
+@csrf_exempt
+def modifierEntreprise(request):
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': "Le champ id est requis"}, status=400)
+
+    try:
+        entreprise = utilisateur.entreprises.get(id=data['id'])
+    except Entreprise.DoesNotExist:
+        return JsonResponse({'error': "Entreprise introuvable"}, status=404)
+
+    # mettre à jour les champs de l'entreprise
+    for champ in ['nom_Entreprise', 'num_Enregistrement', 'secteur', 'description',
+                  'email', 'telephone', 'adresse', 'commune','pays',
+                  'longitude', 'latitude']:
+        if champ in data:
+            setattr(entreprise, champ, data[champ])
+
+    _enregistrer_logo_entreprise(entreprise, data.get('logo'))
+
+    try:
+        entreprise.save()
+    except IntegrityError:
+        return JsonResponse({'error': "Le nom de l'entreprise ou le numéro d'enregistrement existe déjà"}, status=400)
+
+    return JsonResponse({
+        'message':    'Entreprise mise à jour avec succès',
+        'entreprise': _serialiseEntreprise(entreprise, request),
+    }, status=200)
+
+
+# ── ENTREPRISE — SUPPRIMER ────────────────────────────────────────────────────
+@csrf_exempt
+def supprimerEntreprise(request):
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': "Le champ id est requis"}, status=400)
+
+    try:
+        entreprise = utilisateur.entreprises.get(id=data['id'])
+    except Entreprise.DoesNotExist:
+        return JsonResponse({'error': "Entreprise introuvable"}, status=404)
+
+    entreprise.delete()
+
+    return JsonResponse({'message': 'Entreprise supprimée avec succès'}, status=200)
+
+
+# ── ENTREPRISE — SUPPRIMER LE LOGO ────────────────────────────────────────────
+@csrf_exempt
+def supprimerLogoEntreprise(request):
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': "Le champ id est requis"}, status=400)
+
+    try:
+        entreprise = utilisateur.entreprises.get(id=data['id'])
+    except Entreprise.DoesNotExist:
+        return JsonResponse({'error': "Entreprise introuvable"}, status=404)
+
+    entreprise.supprimer_logo()
+
+    return JsonResponse({
+        'message':    'Logo supprimé avec succès',
+        'entreprise': _serialiseEntreprise(entreprise, request),
+    }, status=200)
+
+
+# ── PROFIL — SUPPRIMER LA PHOTO ───────────────────────────────────────────────
+@csrf_exempt
+def supprimerPhotoProfil(request):
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    profil = utilisateur.profil
+    profil.supprimer_photo_profil()
+
+    return JsonResponse({
+        'message': 'Photo de profil supprimée avec succès',
+        'profil':  _serialiseProfil(profil, request),
+    }, status=200)
+
+
+# ── ADMIN — LISTER LES UTILISATEURS ───────────────────────────────────────────
+@csrf_exempt
+def listerUtilisateursAdmin(request):
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+    if utilisateur.profil.role != 'admin':
+        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+
+    utilisateurs = Utilisateur.objects.all()
+
+    return JsonResponse({
+        'utilisateurs': [
+            {**_serialiseUtilisateur(u), 'role': u.profil.role}
+            for u in utilisateurs
+        ],
+    }, status=200)
+
+
 # ── FONCTIONS UTILITAIRES ─────────────────────────────────────────────────────
 def _get_user_from_token(request):
     """Récupère l'utilisateur depuis le header Authorization: Token xxx"""
@@ -381,6 +636,20 @@ def _enregistrer_photo_profil(profil, photo_data):
 
     fichier_binaire = base64.b64decode(contenu)
     profil.photo_profil.save(photo_data['filename'], ContentFile(fichier_binaire), save=False)
+
+
+def _enregistrer_logo_entreprise(entreprise, logo_data):
+    """Décode un logo envoyé en base64 (JSON) et le sauvegarde sur l'entreprise"""
+    if not logo_data:
+        return
+
+    contenu = logo_data['content']
+    # retirer le préfixe data URL si présent (ex: "data:image/png;base64,...")
+    if contenu.startswith('data:'):
+        contenu = contenu.split(',', 1)[1]
+
+    fichier_binaire = base64.b64decode(contenu)
+    entreprise.logo.save(logo_data['filename'], ContentFile(fichier_binaire), save=False)
 
 # -----------Serialiser pour utilisateur-----------
 def _serialiseUtilisateur(utilisateur):
@@ -416,4 +685,35 @@ def _serialiseProfil(profil, request=None):
         'latitude':    profil.latitude,
         'date_maj':    profil.date_maj.isoformat(),
         'role':        profil.role,
+    }
+
+
+# -----------Serialiser pour entreprise-----------
+def _serialiseEntreprise(entreprise, request=None):
+    """Sérialise une entreprise en dict JSON"""
+    logo_url = None
+    if entreprise.logo:
+        logo_url = entreprise.logo.url
+        if request is not None:
+            logo_url = request.build_absolute_uri(logo_url)
+
+    return {
+        'id':                   entreprise.id,
+        'proprietaire_id':      entreprise.proprietaire_id,
+        'nom_Entreprise':       entreprise.nom_Entreprise,
+        'num_Enregistrement':   entreprise.num_Enregistrement,
+        'secteur':              entreprise.secteur,
+        'description':          entreprise.description,
+        'email':                entreprise.email,
+        'telephone':            entreprise.telephone,
+        'adresse':              entreprise.adresse,
+        'commune':              entreprise.commune,
+        'pays':                 entreprise.pays,
+        'logo':                 logo_url,
+        'longitude':            entreprise.longitude,
+        'latitude':             entreprise.latitude,
+        'est_verifiee':         entreprise.est_verifiee,
+        'statut_verification':  entreprise.statut_verification,
+        'date_creation':        entreprise.date_creation.isoformat(),
+        'date_maj':             entreprise.date_maj.isoformat(),
     }

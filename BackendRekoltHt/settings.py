@@ -179,3 +179,7 @@ STATIC_URL = 'static/'
 # Fichiers médias (photos de profil, etc.)
 MEDIA_URL  = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# les photos/logos sont envoyées en base64 dans le JSON (~+33% de taille) — la limite
+# par défaut de Django (~2.6 Mo) est donc trop basse pour les images de 5 Mo annoncées au frontend
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 Mo

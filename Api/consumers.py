@@ -11,4 +11,4 @@ class GlobalConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_discard("global", self.channel_name)
 
     async def global_update(self, event):
-        await self.send(text_data = json.dump(event["message"]))
+        await self.send(text_data = json.dumps(event["message"]))
