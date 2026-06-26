@@ -27,10 +27,11 @@ class Utilisateur(models.Model):
     nom              = models.CharField(max_length=100)
     prenom           = models.CharField(max_length=100)
     email            = models.EmailField(unique=True)
-    mot_de_passe     = models.CharField(max_length=255)  # 100 trop court pour un hash
+    mot_de_passe     = models.CharField(max_length=255)
     telephone        = models.CharField(max_length=20)
     date_inscription = models.DateTimeField(auto_now_add=True)
-    est_actif        = models.BooleanField(default=False)  # False par défaut
+    est_actif        = models.BooleanField(default=False)
+    est_bloquer      = models.BooleanField(default=False)
 
     class Meta:
         db_table            = 'utilisateur'
@@ -52,6 +53,10 @@ class Utilisateur(models.Model):
         # haser_password est maintenant dans models.py — pas d'import circulaire
         self.mot_de_passe = haser_password(nouveau_mot_de_passe)
         self.save()
+
+    def possede_entreprise(self):
+        """Vérifie si l'utilisateur a au moins une entreprise enregistrée"""
+        return self.entreprises.exists()
 
 
 # ── MODÈLE PROFIL ─────────────────────────────────────────────────────────────
@@ -119,6 +124,13 @@ class Profil(models.Model):   # ← P majuscule
             'latitude':  self.latitude,
         }
 
+    def supprimer_photo_profil(self):
+        """Supprime la photo de profil (fichier + référence)"""
+        if self.photo_profil:
+            self.photo_profil.delete(save=False)
+            self.photo_profil = None
+            self.save()
+
     def calculer_distance(self, autre_profil):
         """Calcule la distance en km entre deux profils"""
         if None in [self.latitude, self.longitude,
@@ -127,4 +139,93 @@ class Profil(models.Model):   # ← P majuscule
 
         coord1 = (self.latitude,       self.longitude)
         coord2 = (autre_profil.latitude, autre_profil.longitude)
+        return geodesic(coord1, coord2).kilometers
+
+class Entreprise(models.Model):
+
+    SECTEURS = [
+        ('agriculture', 'Agriculture'),
+        ('transformation', 'Transformation'),
+        ('distribution', 'Distribution'),
+        ('autre', 'Autre'),
+    ]
+    STATUTS_VERIFICATION = [
+        ('en attente', 'En attente'),
+        ('valide', 'Validé'),
+        ('rejete', 'Rejeté'),
+    ]
+
+    id                  = models.AutoField(primary_key=True)
+    proprietaire        = models.ForeignKey(
+                             Utilisateur,
+                             on_delete    = models.CASCADE,
+                             related_name = 'entreprises'
+                           )
+    nom_Entreprise      = models.CharField(max_length=100, unique=True)
+    num_Enregistrement  = models.CharField(max_length=100, unique=True)
+    secteur             = models.CharField(
+                             max_length = 20,
+                             choices    = SECTEURS,
+                             default    = 'agriculture'
+                           )
+    description         = models.TextField(blank=True, null=True)
+    email               = models.EmailField(blank=True, null=True)
+    telephone           = models.CharField(max_length=20, blank=True)
+    adresse             = models.CharField(max_length=255, blank=True)
+    commune             = models.CharField(max_length=100, blank=True)
+    pays                = models.CharField(max_length=100, default='Haiti')
+    logo                = models.ImageField(upload_to='logos_entreprise/', blank=True, null=True)
+    longitude           = models.FloatField(blank=True, null=True)
+    latitude            = models.FloatField(blank=True, null=True)
+    est_verifiee        = models.BooleanField(default=False)
+    date_creation       = models.DateTimeField(auto_now_add=True)
+    date_maj            = models.DateTimeField(auto_now=True)
+    statut_verification = models.CharField(
+                               max_length = 20,
+                               choices = STATUTS_VERIFICATION,
+                               default = 'en attente' 
+                            )
+
+    class Meta:
+        db_table            = 'entreprise'
+        verbose_name        = 'Entreprise'
+        verbose_name_plural = 'Entreprises'
+        ordering            = ['id']
+
+    def __str__(self):
+        return f"{self.nom_Entreprise} ({self.num_Enregistrement})"
+
+    def mettre_a_jour(self, **kwargs):
+        """Met à jour les informations de l'entreprise"""
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        self.save()
+
+    def modifier_est_verifiee(self):
+        """Active ou désactive la vérification de l'entreprise"""
+        self.est_verifiee = not self.est_verifiee
+        self.save()
+
+    def obtenir_coordonnees(self):
+        """Retourne les coordonnées GPS de l'entreprise"""
+        return {
+            'longitude': self.longitude,
+            'latitude':  self.latitude,
+        }
+
+    def supprimer_logo(self):
+        """Supprime le logo de l'entreprise (fichier + référence)"""
+        if self.logo:
+            self.logo.delete(save=False)
+            self.logo = None
+            self.save()
+
+    def calculer_distance(self, autre_entreprise):
+        """Calcule la distance en km entre deux entreprises"""
+        if None in [self.latitude, self.longitude,
+                    autre_entreprise.latitude, autre_entreprise.longitude]:
+            return None
+
+        coord1 = (self.latitude,           self.longitude)
+        coord2 = (autre_entreprise.latitude, autre_entreprise.longitude)
         return geodesic(coord1, coord2).kilometers
