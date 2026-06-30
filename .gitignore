@@ -18,3 +18,5 @@ htmlcov/
 .idea/
 
 .claude/
+*.pyc
+*.sqlite3
