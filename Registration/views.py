@@ -1,38 +1,52 @@
-import base64
-import json
-import secrets
-import requests
-from django.core.files.base import ContentFile
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.db import IntegrityError
-from .models import Utilisateur, Profil, Entreprise, haser_password, verifier_password
+# ── IMPORTS ───────────────────────────────────────────────────────────────────
+import base64          # décodage des images/logos envoyés en base64 depuis le frontend
+import json            # lecture/écriture du corps des requêtes HTTP au format JSON
+import random          # génération du code PIN à 4 chiffres pour la réinitialisation
+import secrets         # génération des tokens d'authentification cryptographiquement sécurisés
+import requests        # appel HTTP à l'API Google OAuth2 pour valider le token Google
+
+from datetime import timedelta                        # calcul de la date d'expiration (code PIN : +15 min)
+from django.conf import settings                      # accès aux variables de configuration (settings.py)
+from django.core.files.base import ContentFile        # crée un fichier Django en mémoire depuis des octets
+from django.core.mail import send_mail                # envoi d'emails SMTP (code PIN de réinitialisation)
+from django.http import JsonResponse                  # retourne une réponse HTTP avec corps JSON
+from django.utils import timezone                     # horodatage UTC cohérent avec USE_TZ = True
+from django.views.decorators.csrf import csrf_exempt  # désactive la protection CSRF (API JSON, pas de cookies)
+from django.db import IntegrityError, transaction     # IntegrityError pour les doublons, transaction pour l'atomicité
+
+from .models import (
+    Utilisateur,            # modèle parent : identité + mot de passe + statut
+    Profil,                 # informations complémentaires (bio, photo, rôle, GPS)
+    Entreprise,             # compte entreprise, hérite d'Utilisateur (email/mdp propres)
+    CodeReinitialisation,   # code PIN à 4 chiffres, durée de vie 15 minutes
+    Token,                  # token de session persisté en base (single-session)
+    haser_password,         # hash SHA-256 avec sel aléatoire
+    verifier_password,      # vérifie un mot de passe en clair contre son hash
+)
 
 
-# Dictionnaire en mémoire pour stocker les tokens
-# clé = token, valeur = id de l'utilisateur
-TOKENS = {}
-
-# -----------------------------------Google Authntification connection -------------------
-@csrf_exempt
+# ── CONNEXION VIA GOOGLE ──────────────────────────────────────────────────────
+@csrf_exempt  # pas de cookie de session → pas besoin de CSRF
 def google_connection(request):
-    """Connexion via Google — l'utilisateur doit déjà exister"""
+    """Connexion via Google — l'utilisateur doit déjà avoir un compte."""
     if request.method != "POST":
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
     try:
-        data         = json.loads(request.body)
-        google_token = data.get('token')
+        data         = json.loads(request.body)   # désérialise le JSON
+        google_token = data.get('token')           # token OAuth2 fourni par le frontend
 
         if not google_token:
             return JsonResponse({'error': 'Token Google manquant'}, status=400)
-         # vérifie le token auprès de Google
+
+        # appel à l'API Google pour récupérer l'email associé au token
         google_response = requests.get(
             'https://www.googleapis.com/oauth2/v3/userinfo',
             headers={'Authorization': f'Bearer {google_token}'}
         )
 
         if google_response.status_code != 200:
+            # token invalide ou expiré côté Google
             return JsonResponse({'error': 'Token Google invalide'}, status=401)
 
         google_data = google_response.json()
@@ -41,35 +55,40 @@ def google_connection(request):
         if not email:
             return JsonResponse({'error': 'Email Google non disponible'}, status=400)
 
-        # vérifie si l'utilisateur existe
+        # vérifie que l'utilisateur possède déjà un compte
         try:
             utilisateur = Utilisateur.objects.get(email=email)
         except Utilisateur.DoesNotExist:
-            # ← message clair si le compte n'existe pas
+            # message bilingue : guide l'utilisateur vers l'inscription
             return JsonResponse({
                 'error': 'Kont sa a pa egziste. Tanpri enskri dabò.'
             }, status=404)
 
-        # active l'utilisateur
+        # marquer l'utilisateur comme en ligne (est_actif = indicateur de présence)
         if not utilisateur.est_actif:
             utilisateur.modifier_est_actif()
 
-        token         = secrets.token_hex(32)
-        TOKENS[token] = utilisateur.id
+        # single-session : supprimer tous les tokens existants avant d'en créer un nouveau
+        # → force la déconnexion de tout autre navigateur/onglet déjà connecté
+        Token.objects.filter(utilisateur=utilisateur).delete()
+        token = secrets.token_hex(32)  # 64 caractères hexadécimaux (256 bits d'entropie)
+        Token.objects.create(utilisateur=utilisateur, cle=token)
 
         return JsonResponse({
             'message':     'Koneksyon reyisi via Google',
             'token':       token,
             'utilisateur': _serialiseUtilisateur(utilisateur),
         })
+
     except Exception as e:
         print("ERREUR google_connexion :", str(e))
         return JsonResponse({'error': str(e)}, status=500)
 
-# ------------------------------------Google auth inscription-------------------
+
+# ── INSCRIPTION VIA GOOGLE ────────────────────────────────────────────────────
 @csrf_exempt
 def google_inscription(request):
-    """Inscription via Google — crée un nouveau compte"""
+    """Inscription via Google — crée un nouveau compte depuis les infos Google."""
     if request.method != "POST":
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -80,7 +99,7 @@ def google_inscription(request):
         if not google_token:
             return JsonResponse({'error': 'Token Google manquant'}, status=400)
 
-        # vérifie le token auprès de Google
+        # valider le token auprès de Google et récupérer les informations du compte
         google_response = requests.get(
             'https://www.googleapis.com/oauth2/v3/userinfo',
             headers={'Authorization': f'Bearer {google_token}'}
@@ -90,35 +109,43 @@ def google_inscription(request):
 
         google_data = google_response.json()
         email       = google_data.get('email')
-        nom         = google_data.get('family_name',  'Inconnu')
-        prenom      = google_data.get('given_name',   'Inconnu')
+        nom         = google_data.get('family_name',  'Inconnu')   # nom de famille Google
+        prenom      = google_data.get('given_name',   'Inconnu')   # prénom Google
 
         if not email:
             return JsonResponse({'error': 'Email Google non disponible'}, status=400)
+
+        # bloquer si le compte existe déjà → rediriger vers la connexion
         if Utilisateur.objects.filter(email=email).exists():
             return JsonResponse({
                 'error': 'Kont sa a deja egziste. Tanpri konekte.'
             }, status=400)
+
+        # créer l'utilisateur avec un mot de passe aléatoire (connexion uniquement via Google)
         utilisateur = Utilisateur.objects.create(
             nom          = nom,
             prenom       = prenom,
             email        = email,
-            mot_de_passe = haser_password(secrets.token_hex(16)),
+            mot_de_passe = haser_password(secrets.token_hex(16)),  # mdp inaccessible à l'utilisateur
             telephone    = '',
-            est_actif    = False,
+            est_actif    = False,   # sera activé juste après
         )
 
-        # le profil est créé par le signal
-        # on met juste à jour les champs supplémentaires
-        profil      = utilisateur.profil
-        profil.pays = 'Haiti'
-        profil.role = data.get('role', 'acheteur')
-        profil.latitude  = data.get('latitude', None)
-        profil.longitude = data.get('longitude', None)
+        # compléter le profil créé automatiquement par le signal post_save
+        profil           = utilisateur.profil
+        profil.pays      = 'Haiti'
+        profil.role      = data.get('role',      'acheteur')   # rôle choisi pendant l'inscription
+        profil.latitude  = _coord_ou_none(data.get('latitude'))
+        profil.longitude = _coord_ou_none(data.get('longitude'))
         profil.save()
 
-        token         = secrets.token_hex(32)
-        TOKENS[token] = utilisateur.id
+        # activer l'utilisateur (est_actif = présence en ligne)
+        if not utilisateur.est_actif:
+            utilisateur.modifier_est_actif()
+
+        # créer le token de session
+        token = secrets.token_hex(32)
+        Token.objects.create(utilisateur=utilisateur, cle=token)
 
         return JsonResponse({
             'message':     'Enskripsyon reyisi via Google',
@@ -130,51 +157,61 @@ def google_inscription(request):
         print("ERREUR google_inscription :", str(e))
         return JsonResponse({'error': str(e)}, status=500)
 
-# ──-------- INSCRIPTION ───────────────────────────────────────────────────────────────
+
+# ── INSCRIPTION CLASSIQUE ─────────────────────────────────────────────────────
 @csrf_exempt
 def sinscrire(request):
+    """Inscription avec email + mot de passe."""
     if request.method != 'POST':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
-    data = json.loads(request.body)
+    # parser le JSON du corps de la requête
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
-    # vérifier les champs obligatoires
+    # vérifier la présence de tous les champs obligatoires
     for field in ['nom', 'prenom', 'email', 'mot_de_passe', 'telephone']:
         if field not in data:
             return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
 
-    # vérifier si l'email existe déjà
+    # vérifier l'unicité de l'email avant la création
     if Utilisateur.objects.filter(email=data['email']).exists():
         return JsonResponse({'error': "L'email existe déjà"}, status=400)
 
-    # créer l'utilisateur
-    utilisateur = Utilisateur.objects.create(
-        nom          = data['nom'],
-        prenom       = data['prenom'],
-        email        = data['email'],
-        mot_de_passe = haser_password(data['mot_de_passe']),
-        telephone    = data['telephone'],
-        est_actif    = False,
-    )
+    try:
+        # transaction atomique : si la sauvegarde du profil échoue, l'utilisateur est annulé
+        with transaction.atomic():
+            utilisateur = Utilisateur.objects.create(
+                nom          = data['nom'],
+                prenom       = data['prenom'],
+                email        = data['email'],
+                mot_de_passe = haser_password(data['mot_de_passe']),  # hashage avant stockage
+                telephone    = data['telephone'],
+                est_actif    = False,   # sera activé à la première connexion
+            )
 
+            # le signal post_save crée automatiquement le Profil lié
+            profil           = utilisateur.profil
+            profil.bio       = data.get('bio',       '')
+            _enregistrer_photo_profil(profil, data.get('photo_profil'))  # base64 → fichier
+            profil.adresse   = data.get('adresse',   '')
+            profil.commune   = data.get('commune',   '')
+            profil.ville     = data.get('ville',     '')
+            profil.pays      = data.get('pays',      'Haiti')
+            profil.role      = data.get('role',      'acheteur')
+            profil.latitude  = _coord_ou_none(data.get('latitude'))
+            profil.longitude = _coord_ou_none(data.get('longitude'))
+            profil.save()
 
-    # le profil est créé automatiquement par le signal
-    # on met à jour les champs supplémentaires
-    profil          = utilisateur.profil
-    profil.bio      = data.get('bio', '')
-    _enregistrer_photo_profil(profil, data.get('photo_profil'))
-    profil.adresse  = data.get('adresse', '')
-    profil.commune  = data.get('commune', '')
-    profil.ville    = data.get('ville',   '')
-    profil.pays     = data.get('pays',    'Haiti')
-    profil.role     = data.get('role',    'acheteur')
-    profil.latitude  = data.get('latitude', None)
-    profil.longitude = data.get('longitude', None)
-    profil.save()
+    except ValueError as e:
+        # _enregistrer_photo_profil lève ValueError si les données base64 sont corrompues
+        return JsonResponse({'error': str(e)}, status=400)
 
-    # créer le token
-    token         = secrets.token_hex(32)
-    TOKENS[token] = utilisateur.id
+    # créer le token après la transaction pour éviter de stocker un token orphelin
+    token = secrets.token_hex(32)
+    Token.objects.create(utilisateur=utilisateur, cle=token)
 
     return JsonResponse({
         'message':     'Utilisateur inscrit avec succès',
@@ -183,36 +220,42 @@ def sinscrire(request):
     }, status=201)
 
 
-# ── CONNEXION ─────────────────────────────────────────────────────────────────
+# ── CONNEXION CLASSIQUE ───────────────────────────────────────────────────────
 @csrf_exempt
 def seConnecter(request):
+    """Connexion avec email + mot de passe."""
     if request.method != 'POST':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
-    data = json.loads(request.body)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
-    # vérifier les champs obligatoires
+    # vérifier la présence des champs d'identification
     for field in ['email', 'mot_de_passe']:
         if field not in data:
             return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
 
-    # vérifier si l'utilisateur existe
+    # récupérer l'utilisateur par son email
     try:
         utilisateur = Utilisateur.objects.get(email=data['email'])
     except Utilisateur.DoesNotExist:
-        return JsonResponse({'error': 'Email n\'existe pas ou est incorrect'}, status=401)
+        return JsonResponse({'error': "Email n'existe pas ou est incorrect"}, status=401)
 
-    # vérifier le mot de passe
+    # comparer le mot de passe saisi avec le hash stocké
     if not verifier_password(data['mot_de_passe'], utilisateur.mot_de_passe):
-        return JsonResponse({'error': 'Le mot de passe n\'existe pas ou incorrect'}, status=401)
+        return JsonResponse({'error': "Le mot de passe n'existe pas ou incorrect"}, status=401)
 
-    # activer l'utilisateur via la méthode du modèle
+    # marquer l'utilisateur comme en ligne
     if not utilisateur.est_actif:
         utilisateur.modifier_est_actif()
 
-    # créer le token
-    token         = secrets.token_hex(32)
-    TOKENS[token] = utilisateur.id
+    # single-session : invalider tous les tokens précédents (connexion sur un autre navigateur)
+    # → le 1er navigateur recevra 401 à sa prochaine requête et sera déconnecté automatiquement
+    Token.objects.filter(utilisateur=utilisateur).delete()
+    token = secrets.token_hex(32)
+    Token.objects.create(utilisateur=utilisateur, cle=token)
 
     return JsonResponse({
         'message':     'Utilisateur connecté avec succès',
@@ -224,6 +267,7 @@ def seConnecter(request):
 # ── DÉCONNEXION ───────────────────────────────────────────────────────────────
 @csrf_exempt
 def seDeconnecter(request):
+    """Déconnecte l'utilisateur : marque hors ligne + supprime le token de session."""
     if request.method != 'POST':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -231,20 +275,21 @@ def seDeconnecter(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification invalide"}, status=401)
 
-    # désactiver l'utilisateur via la méthode du modèle
+    # basculer est_actif → False (indicateur de présence en ligne, pas de désactivation du compte)
     if utilisateur.est_actif:
         utilisateur.modifier_est_actif()
 
-    # supprimer le token
+    # supprimer uniquement le token de cette session (pas tous les tokens)
     token_key = request.headers.get('Authorization', '').replace('Token ', '')
-    TOKENS.pop(token_key, None)
+    Token.objects.filter(cle=token_key).delete()
 
     return JsonResponse({'message': 'Utilisateur déconnecté avec succès'}, status=200)
 
 
-# ── PROFIL ────────────────────────────────────────────────────────────────────
+# ── AFFICHER LE PROFIL ────────────────────────────────────────────────────────
 @csrf_exempt
 def profilAfficher(request):
+    """Retourne les informations de l'utilisateur connecté et son profil."""
     if request.method != 'GET':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -252,17 +297,18 @@ def profilAfficher(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
-    profil = utilisateur.profil
+    profil = utilisateur.profil  # accès via la relation OneToOne définie dans models.py
 
     return JsonResponse({
         'utilisateur': _serialiseUtilisateur(utilisateur),
-        'profil':      _serialiseProfil(profil, request),
+        'profil':      _serialiseProfil(profil, request),  # request pour construire l'URL absolue de la photo
     }, status=200)
 
 
-# ── MODIFIER UTILISATEUR ──────────────────────────────────────────────────────
+# ── MODIFIER LES INFORMATIONS UTILISATEUR ────────────────────────────────────
 @csrf_exempt
 def modifierUtilisateur(request):
+    """Met à jour nom, prénom, email et/ou téléphone de l'utilisateur connecté."""
     if request.method != 'PUT':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -275,7 +321,7 @@ def modifierUtilisateur(request):
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
-    # mettre à jour les champs de l'utilisateur
+    # mise à jour partielle : seuls les champs présents dans le JSON sont modifiés
     for champ in ['nom', 'prenom', 'email', 'telephone']:
         if champ in data:
             setattr(utilisateur, champ, data[champ])
@@ -283,6 +329,7 @@ def modifierUtilisateur(request):
     try:
         utilisateur.save()
     except IntegrityError:
+        # l'email choisi est déjà utilisé par un autre compte
         return JsonResponse({'error': "L'email existe déjà"}, status=400)
 
     return JsonResponse({
@@ -291,9 +338,10 @@ def modifierUtilisateur(request):
     }, status=200)
 
 
-# ── MODIFIER PROFIL ───────────────────────────────────────────────────────────
+# ── MODIFIER LE PROFIL ────────────────────────────────────────────────────────
 @csrf_exempt
 def modifierProfil(request):
+    """Met à jour les informations du profil (bio, adresse, photo, rôle, GPS…)."""
     if request.method != 'PUT':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -308,12 +356,19 @@ def modifierProfil(request):
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
-    # mettre à jour les champs du profil
+    # mise à jour partielle des champs texte/numériques du profil
     for champ in ['bio', 'adresse', 'commune', 'ville', 'pays', 'role', 'latitude', 'longitude']:
         if champ in data:
-            setattr(profil, champ, data[champ])
+            valeur = data[champ]
+            if champ in ('latitude', 'longitude'):
+                valeur = _coord_ou_none(valeur)
+            setattr(profil, champ, valeur)
 
-    _enregistrer_photo_profil(profil, data.get('photo_profil'))
+    # traiter la photo uniquement si un nouveau fichier est fourni
+    try:
+        _enregistrer_photo_profil(profil, data.get('photo_profil'))
+    except ValueError as e:
+        return JsonResponse({'error': str(e)}, status=400)
 
     profil.save()
 
@@ -323,9 +378,10 @@ def modifierProfil(request):
     }, status=200)
 
 
-# ── MODIFIER MOT DE PASSE ─────────────────────────────────────────────────────
+# ── MODIFIER LE MOT DE PASSE ──────────────────────────────────────────────────
 @csrf_exempt
 def modifierMotDePasse(request):
+    """Change le mot de passe après vérification de l'ancien."""
     if request.method != 'PUT':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -335,33 +391,36 @@ def modifierMotDePasse(request):
 
     data = json.loads(request.body)
 
-    # vérifier les champs obligatoires
+    # les deux champs sont obligatoires pour ce endpoint
     for field in ['ancien_mot_de_passe', 'nouveau_mot_de_passe']:
         if field not in data:
             return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
 
-    # vérifier l'ancien mot de passe
+    # vérifier que l'ancien mot de passe est correct avant d'accepter le changement
     if not verifier_password(data['ancien_mot_de_passe'], utilisateur.mot_de_passe):
         return JsonResponse({'error': 'Ancien mot de passe incorrect'}, status=401)
 
-    # modifier via la méthode du modèle
+    # hash + sauvegarde via la méthode du modèle
     utilisateur.modifier_mot_de_passe(data['nouveau_mot_de_passe'])
 
     return JsonResponse({'message': 'Mot de passe modifié avec succès'}, status=200)
 
 
-# ── ENTREPRISE — VÉRIFIER (avant inscription, sans authentification) ─────────
+# ── VÉRIFIER SI UNE ENTREPRISE EXISTE (sans authentification) ────────────────
 @csrf_exempt
 def verifierEntreprise(request):
+    """Vérifie l'unicité du nom et du numéro d'enregistrement avant la création."""
     if request.method != 'GET':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
+    # paramètres passés dans la query string (?nom_Entreprise=...&num_Enregistrement=...)
     nom_Entreprise     = request.GET.get('nom_Entreprise', '').strip()
     num_Enregistrement = request.GET.get('num_Enregistrement', '').strip()
 
     if not nom_Entreprise or not num_Enregistrement:
-        return JsonResponse({'error': 'Le nom et le numéro d\'enregistrement sont requis'}, status=400)
+        return JsonResponse({'error': "Le nom et le numéro d'enregistrement sont requis"}, status=400)
 
+    # trois vérifications distinctes pour retourner un message précis
     existe_combo = Entreprise.objects.filter(
         nom_Entreprise=nom_Entreprise,
         num_Enregistrement=num_Enregistrement,
@@ -369,6 +428,7 @@ def verifierEntreprise(request):
     existe_nom = Entreprise.objects.filter(nom_Entreprise=nom_Entreprise).exists()
     existe_num = Entreprise.objects.filter(num_Enregistrement=num_Enregistrement).exists()
 
+    # construire un message d'erreur explicite selon le cas de conflit
     if existe_combo:
         message = "Cette entreprise existe déjà"
     elif existe_nom:
@@ -376,7 +436,7 @@ def verifierEntreprise(request):
     elif existe_num:
         message = "Le numéro d'enregistrement existe déjà"
     else:
-        message = None
+        message = None  # aucun conflit → l'entreprise peut être créée
 
     return JsonResponse({
         'existe':  bool(existe_combo or existe_nom or existe_num),
@@ -384,66 +444,93 @@ def verifierEntreprise(request):
     }, status=200)
 
 
-# ── ENTREPRISE — CRÉER ────────────────────────────────────────────────────────
+# ── CRÉER UNE ENTREPRISE ──────────────────────────────────────────────────────
 @csrf_exempt
 def creerEntreprise(request):
+    """
+    Inscrit un nouveau compte entreprise, de façon autonome (pas de compte
+    personnel requis au préalable) : l'entreprise possède directement son
+    propre email/mot de passe et se connecte ensuite via /connexion/ comme
+    n'importe quel compte. Elle est propriétaire d'elle-même.
+    """
     if request.method != 'POST':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
-
-    utilisateur = _get_user_from_token(request)
-    if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
-    # vérifier les champs obligatoires
-    for field in ['nom_Entreprise', 'num_Enregistrement']:
+    # champs obligatoires : identité de l'entreprise + ses propres identifiants de connexion
+    # (Entreprise hérite d'Utilisateur : c'est un compte à part entière sur la plateforme)
+    for field in ['nom_Entreprise', 'num_Enregistrement', 'email', 'mot_de_passe', 'telephone']:
         if field not in data:
             return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
 
-    # vérifier si cette entreprise (même nom + même numéro) existe déjà
+    # vérifications d'unicité avant d'insérer (évite des erreurs DB moins lisibles)
     if Entreprise.objects.filter(
         nom_Entreprise=data['nom_Entreprise'],
         num_Enregistrement=data['num_Enregistrement'],
     ).exists():
         return JsonResponse({'error': "Cette entreprise existe déjà"}, status=400)
 
-    # vérifier si le nom ou le numéro d'enregistrement existe déjà séparément
     if Entreprise.objects.filter(nom_Entreprise=data['nom_Entreprise']).exists():
         return JsonResponse({'error': "Le nom de l'entreprise existe déjà"}, status=400)
+
     if Entreprise.objects.filter(num_Enregistrement=data['num_Enregistrement']).exists():
         return JsonResponse({'error': "Le numéro d'enregistrement existe déjà"}, status=400)
 
-    entreprise = Entreprise.objects.create(
-        proprietaire       = utilisateur,
-        nom_Entreprise     = data['nom_Entreprise'],
-        num_Enregistrement = data['num_Enregistrement'],
-        secteur             = data.get('secteur',     'agriculture'),
-        description         = data.get('description', ''),
-        email               = data.get('email',       ''),
-        telephone           = data.get('telephone',   ''),
-        adresse             = data.get('adresse',     ''),
-        commune             = data.get('commune',     ''),
-        pays                = data.get('pays',        'Haiti'),
-        longitude           = data.get('longitude',   None),
-        latitude            = data.get('latitude',    None),
-    )
+    # l'email de connexion de l'entreprise est partagé avec la table Utilisateur (unique)
+    if Utilisateur.objects.filter(email=data['email']).exists():
+        return JsonResponse({'error': "L'email existe déjà"}, status=400)
 
-    _enregistrer_logo_entreprise(entreprise, data.get('logo'))
-    entreprise.save()
+    try:
+        # transaction atomique : si le logo est invalide, l'entreprise n'est pas créée
+        with transaction.atomic():
+            entreprise = Entreprise.objects.create(
+                nom                = data['nom_Entreprise'],       # pas d'info personnelle : identité = celle de l'entreprise
+                prenom             = '',
+                email              = data['email'],
+                mot_de_passe       = haser_password(data['mot_de_passe']),  # hashage avant stockage
+                telephone          = data['telephone'],            # téléphone de contact de l'entreprise
+                nom_Entreprise     = data['nom_Entreprise'],
+                num_Enregistrement = data['num_Enregistrement'],
+                secteur            = data.get('secteur',     'agriculture'),
+                description        = data.get('description', ''),
+                adresse            = data.get('adresse',     ''),
+                commune            = data.get('commune',     ''),
+                pays               = data.get('pays',        'Haiti'),
+                longitude          = _coord_ou_none(data.get('longitude')),
+                latitude           = _coord_ou_none(data.get('latitude')),
+            )
+            entreprise.proprietaire = entreprise   # l'entreprise gère son propre compte
+            _enregistrer_logo_entreprise(entreprise, data.get('logo'))  # base64 → fichier
+            entreprise.save()
+            # le signal post_save crée automatiquement le Profil (rôle 'acheteur' par défaut)
+
+    except ValueError as e:
+        # logo base64 corrompu ou malformé
+        return JsonResponse({'error': str(e)}, status=400)
+
+    # émet un token de session directement, comme /inscription/, pour connecter
+    # l'entreprise immédiatement après son inscription
+    token = secrets.token_hex(32)
+    Token.objects.create(utilisateur=entreprise, cle=token)
 
     return JsonResponse({
-        'message':    'Entreprise créée avec succès',
-        'entreprise': _serialiseEntreprise(entreprise, request),
+        'message':     'Entreprise inscrite avec succès',
+        'token':       token,
+        # Entreprise hérite d'Utilisateur : ces deux vues du même compte
+        # permettent au frontend de le traiter comme un compte connecté normal.
+        'utilisateur': _serialiseUtilisateur(entreprise),
+        'entreprise':  _serialiseEntreprise(entreprise, request),
     }, status=201)
 
 
-# ── ENTREPRISE — LISTER ───────────────────────────────────────────────────────
+# ── LISTER LES ENTREPRISES ────────────────────────────────────────────────────
 @csrf_exempt
 def listerEntreprises(request):
+    """Liste les entreprises de l'utilisateur (ou toutes si rôle admin)."""
     if request.method != 'GET':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -451,20 +538,21 @@ def listerEntreprises(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
-    # un admin voit toutes les entreprises créées, un utilisateur normal ne voit que les siennes
+    # un admin voit toutes les entreprises de la plateforme, les autres voient uniquement les leurs
     if utilisateur.profil.role == 'admin':
         entreprises = Entreprise.objects.all()
     else:
-        entreprises = utilisateur.entreprises.all()
+        entreprises = utilisateur.entreprises.all()  # relation inverse via ForeignKey
 
     return JsonResponse({
         'entreprises': [_serialiseEntreprise(e, request) for e in entreprises],
     }, status=200)
 
 
-# ── ENTREPRISE — MODIFIER ─────────────────────────────────────────────────────
+# ── MODIFIER UNE ENTREPRISE ───────────────────────────────────────────────────
 @csrf_exempt
 def modifierEntreprise(request):
+    """Met à jour une entreprise appartenant à l'utilisateur connecté."""
     if request.method != 'PUT':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -480,24 +568,35 @@ def modifierEntreprise(request):
     if 'id' not in data:
         return JsonResponse({'error': "Le champ id est requis"}, status=400)
 
+    # scoper la recherche à l'utilisateur connecté pour empêcher la modification d'entreprises tierces
     try:
         entreprise = utilisateur.entreprises.get(id=data['id'])
     except Entreprise.DoesNotExist:
         return JsonResponse({'error': "Entreprise introuvable"}, status=404)
 
-    # mettre à jour les champs de l'entreprise
+    # mise à jour partielle : seuls les champs présents dans le JSON sont modifiés
     for champ in ['nom_Entreprise', 'num_Enregistrement', 'secteur', 'description',
-                  'email', 'telephone', 'adresse', 'commune','pays',
+                  'email', 'telephone', 'adresse', 'commune', 'pays',
                   'longitude', 'latitude']:
         if champ in data:
-            setattr(entreprise, champ, data[champ])
+            valeur = data[champ]
+            if champ in ('latitude', 'longitude'):
+                valeur = _coord_ou_none(valeur)
+            setattr(entreprise, champ, valeur)
 
-    _enregistrer_logo_entreprise(entreprise, data.get('logo'))
+    # traiter le logo uniquement si un nouveau fichier est fourni
+    try:
+        _enregistrer_logo_entreprise(entreprise, data.get('logo'))
+    except ValueError as e:
+        return JsonResponse({'error': str(e)}, status=400)
 
     try:
         entreprise.save()
     except IntegrityError:
-        return JsonResponse({'error': "Le nom de l'entreprise ou le numéro d'enregistrement existe déjà"}, status=400)
+        # nom, numéro d'enregistrement ou email déjà utilisé par un autre compte
+        return JsonResponse({
+            'error': "Le nom de l'entreprise, le numéro d'enregistrement ou l'email existe déjà"
+        }, status=400)
 
     return JsonResponse({
         'message':    'Entreprise mise à jour avec succès',
@@ -505,9 +604,10 @@ def modifierEntreprise(request):
     }, status=200)
 
 
-# ── ENTREPRISE — SUPPRIMER ────────────────────────────────────────────────────
+# ── SUPPRIMER UNE ENTREPRISE ──────────────────────────────────────────────────
 @csrf_exempt
 def supprimerEntreprise(request):
+    """Supprime définitivement une entreprise de l'utilisateur connecté."""
     if request.method != 'DELETE':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -523,19 +623,21 @@ def supprimerEntreprise(request):
     if 'id' not in data:
         return JsonResponse({'error': "Le champ id est requis"}, status=400)
 
+    # vérifier que l'entreprise appartient bien à l'utilisateur connecté
     try:
         entreprise = utilisateur.entreprises.get(id=data['id'])
     except Entreprise.DoesNotExist:
         return JsonResponse({'error': "Entreprise introuvable"}, status=404)
 
-    entreprise.delete()
+    entreprise.delete()  # CASCADE : supprime aussi les fichiers liés (logo)
 
     return JsonResponse({'message': 'Entreprise supprimée avec succès'}, status=200)
 
 
-# ── ENTREPRISE — SUPPRIMER LE LOGO ────────────────────────────────────────────
+# ── SUPPRIMER LE LOGO D'UNE ENTREPRISE ───────────────────────────────────────
 @csrf_exempt
 def supprimerLogoEntreprise(request):
+    """Supprime le logo d'une entreprise (fichier physique + référence en base)."""
     if request.method != 'DELETE':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -556,7 +658,7 @@ def supprimerLogoEntreprise(request):
     except Entreprise.DoesNotExist:
         return JsonResponse({'error': "Entreprise introuvable"}, status=404)
 
-    entreprise.supprimer_logo()
+    entreprise.supprimer_logo()  # méthode du modèle : supprime fichier + met logo=None
 
     return JsonResponse({
         'message':    'Logo supprimé avec succès',
@@ -564,9 +666,10 @@ def supprimerLogoEntreprise(request):
     }, status=200)
 
 
-# ── PROFIL — SUPPRIMER LA PHOTO ───────────────────────────────────────────────
+# ── SUPPRIMER LA PHOTO DE PROFIL ──────────────────────────────────────────────
 @csrf_exempt
 def supprimerPhotoProfil(request):
+    """Supprime la photo de profil (fichier physique + référence en base)."""
     if request.method != 'DELETE':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -575,7 +678,7 @@ def supprimerPhotoProfil(request):
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
     profil = utilisateur.profil
-    profil.supprimer_photo_profil()
+    profil.supprimer_photo_profil()  # méthode du modèle : supprime fichier + met photo_profil=None
 
     return JsonResponse({
         'message': 'Photo de profil supprimée avec succès',
@@ -583,15 +686,18 @@ def supprimerPhotoProfil(request):
     }, status=200)
 
 
-# ── ADMIN — LISTER LES UTILISATEURS ───────────────────────────────────────────
+# ── ADMIN — LISTER TOUS LES UTILISATEURS ─────────────────────────────────────
 @csrf_exempt
 def listerUtilisateursAdmin(request):
+    """Liste tous les utilisateurs de la plateforme (accès réservé au rôle admin)."""
     if request.method != 'GET':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    # vérification du rôle avant d'exposer des données sensibles
     if utilisateur.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
 
@@ -599,98 +705,293 @@ def listerUtilisateursAdmin(request):
 
     return JsonResponse({
         'utilisateurs': [
+            # fusionner les infos utilisateur avec le rôle du profil associé
             {**_serialiseUtilisateur(u), 'role': u.profil.role}
             for u in utilisateurs
         ],
     }, status=200)
 
 
-# ── FONCTIONS UTILITAIRES ─────────────────────────────────────────────────────
+# ── DEMANDER UN CODE PIN DE RÉINITIALISATION ──────────────────────────────────
+@csrf_exempt
+def demanderReinitialisation(request):
+    """Génère un code PIN à 4 chiffres et l'envoie par email (valable 15 min)."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    email = data.get('email', '').strip()
+    if not email:
+        return JsonResponse({'error': 'Le champ email est requis'}, status=400)
+
+    try:
+        utilisateur = Utilisateur.objects.get(email=email)
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Aucun compte associé à cet email'}, status=404)
+
+    try:
+        # supprimer les anciens codes non utilisés pour éviter l'accumulation en base
+        CodeReinitialisation.objects.filter(utilisateur=utilisateur, utilise=False).delete()
+
+        # générer un code PIN à 4 chiffres avec zéro de remplissage (ex: "0042")
+        code            = f"{random.randint(0, 9999):04d}"
+        date_expiration = timezone.now() + timedelta(minutes=15)  # expire dans 15 minutes
+
+        CodeReinitialisation.objects.create(
+            utilisateur     = utilisateur,
+            code            = code,
+            date_expiration = date_expiration,
+        )
+
+        # envoyer le code par email via le backend SMTP configuré dans settings.py
+        send_mail(
+            subject        = 'Réinitialisation de mot de passe — RekoltHt',
+            message        = (
+                f"Bonjour {utilisateur.prenom},\n\n"
+                f"Votre code de réinitialisation est : {code}\n\n"
+                f"Ce code est valable pendant 15 minutes.\n\n"
+                f"Si vous n'avez pas demandé cette réinitialisation, ignorez cet email.\n\n"
+                f"L'équipe RekoltHt"
+            ),
+            from_email     = settings.DEFAULT_FROM_EMAIL,
+            recipient_list = [email],
+            fail_silently  = False,  # lève une exception si le serveur SMTP est injoignable
+        )
+
+    except Exception as e:
+        print("ERREUR demanderReinitialisation :", str(e))
+        return JsonResponse({'error': str(e)}, status=500)
+
+    return JsonResponse({'message': 'Code de réinitialisation envoyé par email'}, status=200)
+
+
+# ── VÉRIFIER LE CODE PIN (sans changer le mot de passe) ──────────────────────
+@csrf_exempt
+def verifierCodeReinitialisation(request):
+    """Valide le code PIN reçu par email sans encore réinitialiser le mot de passe."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    for field in ['email', 'code']:
+        if field not in data:
+            return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
+
+    email = data['email'].strip()
+    code  = data['code'].strip()
+
+    try:
+        utilisateur = Utilisateur.objects.get(email=email)
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Aucun compte associé à cet email'}, status=404)
+
+    # récupérer le code le plus récent non utilisé pour cet email
+    try:
+        code_obj = CodeReinitialisation.objects.filter(
+            utilisateur = utilisateur,
+            code        = code,
+            utilise     = False,
+        ).latest('date_creation')
+    except CodeReinitialisation.DoesNotExist:
+        return JsonResponse({'error': 'Code invalide'}, status=400)
+
+    # vérifier que le code n'a pas expiré (date_expiration > maintenant)
+    if not code_obj.est_valide():
+        return JsonResponse({'error': 'Code expiré ou déjà utilisé'}, status=400)
+
+    return JsonResponse({'message': 'Code valide'}, status=200)
+
+
+# ── RÉINITIALISER LE MOT DE PASSE VIA CODE PIN ───────────────────────────────
+@csrf_exempt
+def reinitialiserMotDePasse(request):
+    """Réinitialise le mot de passe après validation du code PIN (protégé contre les races conditions)."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    for field in ['email', 'code', 'nouveau_mot_de_passe']:
+        if field not in data:
+            return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
+
+    email                = data['email'].strip()
+    code                 = data['code'].strip()
+    nouveau_mot_de_passe = data['nouveau_mot_de_passe']
+
+    try:
+        utilisateur = Utilisateur.objects.get(email=email)
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Aucun compte associé à cet email'}, status=404)
+
+    try:
+        with transaction.atomic():
+            # select_for_update() pose un verrou sur la ligne pour empêcher deux requêtes
+            # simultanées d'utiliser le même code (race condition sur double-soumission du formulaire)
+            code_obj = CodeReinitialisation.objects.select_for_update().filter(
+                utilisateur = utilisateur,
+                code        = code,
+                utilise     = False,
+            ).latest('date_creation')
+
+            if not code_obj.est_valide():
+                return JsonResponse({'error': 'Code expiré ou déjà utilisé'}, status=400)
+
+            # marquer le code comme utilisé avant de changer le mot de passe
+            code_obj.utilise = True
+            code_obj.save()
+
+            # hash + sauvegarde via la méthode du modèle
+            utilisateur.modifier_mot_de_passe(nouveau_mot_de_passe)
+
+    except CodeReinitialisation.DoesNotExist:
+        return JsonResponse({'error': 'Code invalide'}, status=400)
+    except Exception as e:
+        print("ERREUR reinitialiserMotDePasse :", str(e))
+        return JsonResponse({'error': str(e)}, status=500)
+
+    return JsonResponse({'message': 'Mot de passe réinitialisé avec succès'}, status=200)
+
+
+# ── FONCTIONS UTILITAIRES PRIVÉES ─────────────────────────────────────────────
+
+def _coord_ou_none(valeur):
+    """
+    Convertit une coordonnée GPS reçue du frontend en float, ou None si absente.
+    Le frontend envoie parfois une chaîne vide ('') quand la géolocalisation a
+    échoué/été refusée — un FloatField Django rejette '' (attend un nombre ou None).
+    """
+    if valeur in (None, ''):
+        return None
+    return valeur
+
+
 def _get_user_from_token(request):
-    """Récupère l'utilisateur depuis le header Authorization: Token xxx"""
+    """
+    Résout le token du header Authorization: Token <cle> en un objet Utilisateur.
+    Retourne None si le header est absent ou si le token n'existe pas en base.
+    """
     auth = request.headers.get('Authorization', '')
     if not auth:
         return None
 
-    token_key = auth.replace('Token ', '')
-    user_id   = TOKENS.get(token_key)
-
-    if not user_id:
-        return None
+    token_key = auth.replace('Token ', '')  # extraire la clé après le préfixe "Token "
 
     try:
-        return Utilisateur.objects.get(id=user_id)
-    except Utilisateur.DoesNotExist:
+        # select_related évite une requête SQL supplémentaire pour charger l'utilisateur
+        token = Token.objects.select_related('utilisateur').get(cle=token_key)
+        return token.utilisateur
+    except Token.DoesNotExist:
+        # token inconnu ou révoqué (single-session → ancien token supprimé)
         return None
 
 
 def _enregistrer_photo_profil(profil, photo_data):
-    """Décode une image envoyée en base64 (JSON) et la sauvegarde sur le profil"""
+    """
+    Décode une image encodée en base64 et la sauvegarde comme photo de profil.
+    photo_data doit être un dict avec les clés 'content' (base64) et 'filename'.
+    Lève ValueError si les données sont corrompues ou mal formées.
+    """
     if not photo_data:
-        return
+        return  # aucune photo fournie → on ne touche pas la photo existante
 
-    contenu = photo_data['content']
-    # retirer le préfixe data URL si présent (ex: "data:image/png;base64,...")
-    if contenu.startswith('data:'):
-        contenu = contenu.split(',', 1)[1]
+    try:
+        contenu = photo_data['content']
 
-    fichier_binaire = base64.b64decode(contenu)
-    profil.photo_profil.save(photo_data['filename'], ContentFile(fichier_binaire), save=False)
+        # retirer le préfixe data URL si présent (ex: "data:image/png;base64,iVBOR...")
+        if contenu.startswith('data:'):
+            contenu = contenu.split(',', 1)[1]
+
+        fichier_binaire = base64.b64decode(contenu)  # décoder le base64 en octets
+        # save=False : ne sauvegarde pas encore l'objet, permet de grouper les sauvegardes
+        profil.photo_profil.save(photo_data['filename'], ContentFile(fichier_binaire), save=False)
+
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"Photo de profil invalide : {e}")
 
 
 def _enregistrer_logo_entreprise(entreprise, logo_data):
-    """Décode un logo envoyé en base64 (JSON) et le sauvegarde sur l'entreprise"""
+    """
+    Décode un logo encodé en base64 et le sauvegarde sur l'entreprise.
+    logo_data doit être un dict avec les clés 'content' (base64) et 'filename'.
+    Lève ValueError si les données sont corrompues ou mal formées.
+    """
     if not logo_data:
-        return
+        return  # aucun logo fourni → on ne touche pas le logo existant
 
-    contenu = logo_data['content']
-    # retirer le préfixe data URL si présent (ex: "data:image/png;base64,...")
-    if contenu.startswith('data:'):
-        contenu = contenu.split(',', 1)[1]
+    try:
+        contenu = logo_data['content']
 
-    fichier_binaire = base64.b64decode(contenu)
-    entreprise.logo.save(logo_data['filename'], ContentFile(fichier_binaire), save=False)
+        # retirer le préfixe data URL si présent
+        if contenu.startswith('data:'):
+            contenu = contenu.split(',', 1)[1]
 
-# -----------Serialiser pour utilisateur-----------
+        fichier_binaire = base64.b64decode(contenu)
+        entreprise.logo.save(logo_data['filename'], ContentFile(fichier_binaire), save=False)
+
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"Logo invalide : {e}")
+
+
+# ── SÉRIALISEURS ──────────────────────────────────────────────────────────────
+
 def _serialiseUtilisateur(utilisateur):
-    """Sérialise un utilisateur en dict JSON"""
+    """Convertit un objet Utilisateur en dict sérialisable en JSON."""
     return {
         'id':               utilisateur.id,
         'nom':              utilisateur.nom,
         'prenom':           utilisateur.prenom,
         'email':            utilisateur.email,
         'telephone':        utilisateur.telephone,
-        'est_actif':        utilisateur.est_actif,
-        'date_inscription': utilisateur.date_inscription.isoformat(),
+        'est_actif':        utilisateur.est_actif,        # True = en ligne, False = hors ligne
+        'date_inscription': utilisateur.date_inscription.isoformat(),  # format ISO 8601
     }
 
 
 def _serialiseProfil(profil, request=None):
-    """Sérialise un profil en dict JSON"""
+    """
+    Convertit un objet Profil en dict sérialisable en JSON.
+    Si request est fourni, l'URL de la photo est construite en URL absolue
+    (ex: http://localhost:8000/media/photos_profil/image.jpg).
+    """
     photo_url = None
     if profil.photo_profil:
         photo_url = profil.photo_profil.url
         if request is not None:
+            # build_absolute_uri ajoute le schéma + l'hôte à l'URL relative
             photo_url = request.build_absolute_uri(photo_url)
 
     return {
-        'id':          profil.id,
-        'bio':         profil.bio,
+        'id':           profil.id,
+        'bio':          profil.bio,
         'photo_profil': photo_url,
-        'adresse':     profil.adresse,
-        'commune':     profil.commune,
-        'ville':       profil.ville,
-        'pays':        profil.pays,
-        'longitude':   profil.longitude,
-        'latitude':    profil.latitude,
-        'date_maj':    profil.date_maj.isoformat(),
-        'role':        profil.role,
+        'adresse':      profil.adresse,
+        'commune':      profil.commune,
+        'ville':        profil.ville,
+        'pays':         profil.pays,
+        'longitude':    profil.longitude,
+        'latitude':     profil.latitude,
+        'date_maj':     profil.date_maj.isoformat(),
+        'role':         profil.role,  # 'acheteur' | 'vendeur' | 'admin'
     }
 
 
-# -----------Serialiser pour entreprise-----------
 def _serialiseEntreprise(entreprise, request=None):
-    """Sérialise une entreprise en dict JSON"""
+    """
+    Convertit un objet Entreprise en dict sérialisable en JSON.
+    Si request est fourni, l'URL du logo est construite en URL absolue.
+    """
     logo_url = None
     if entreprise.logo:
         logo_url = entreprise.logo.url
@@ -698,22 +999,22 @@ def _serialiseEntreprise(entreprise, request=None):
             logo_url = request.build_absolute_uri(logo_url)
 
     return {
-        'id':                   entreprise.id,
-        'proprietaire_id':      entreprise.proprietaire_id,
-        'nom_Entreprise':       entreprise.nom_Entreprise,
-        'num_Enregistrement':   entreprise.num_Enregistrement,
-        'secteur':              entreprise.secteur,
-        'description':          entreprise.description,
-        'email':                entreprise.email,
-        'telephone':            entreprise.telephone,
-        'adresse':              entreprise.adresse,
-        'commune':              entreprise.commune,
-        'pays':                 entreprise.pays,
-        'logo':                 logo_url,
-        'longitude':            entreprise.longitude,
-        'latitude':             entreprise.latitude,
-        'est_verifiee':         entreprise.est_verifiee,
-        'statut_verification':  entreprise.statut_verification,
-        'date_creation':        entreprise.date_creation.isoformat(),
-        'date_maj':             entreprise.date_maj.isoformat(),
+        'id':                  entreprise.id,
+        'proprietaire_id':     entreprise.proprietaire_id,   # clé étrangère → id de l'Utilisateur
+        'nom_Entreprise':      entreprise.nom_Entreprise,
+        'num_Enregistrement':  entreprise.num_Enregistrement,
+        'secteur':             entreprise.secteur,
+        'description':         entreprise.description,
+        'email':               entreprise.email,
+        'telephone':           entreprise.telephone,
+        'adresse':             entreprise.adresse,
+        'commune':             entreprise.commune,
+        'pays':                entreprise.pays,
+        'logo':                logo_url,
+        'longitude':           entreprise.longitude,
+        'latitude':            entreprise.latitude,
+        'est_verifiee':        entreprise.est_verifiee,           # validation manuelle par un admin
+        'statut_verification': entreprise.statut_verification,   # 'en attente' | 'valide' | 'rejete'
+        'date_creation':       entreprise.date_creation.isoformat(),
+        'date_maj':            entreprise.date_maj.isoformat(),
     }

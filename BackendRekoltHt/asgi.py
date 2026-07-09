@@ -1,26 +1,34 @@
 """
 ASGI config for BackendRekoltHt project.
 
-It exposes the ASGI callable as a module-level variable named ``application``.
+ASGI (Asynchronous Server Gateway Interface) remplace WSGI pour gérer :
+  - les requêtes HTTP classiques (comme WSGI)
+  - les connexions WebSocket en temps réel (notifications, chat…)
 
-For more information on this file, see
-https://docs.djangoproject.com/en/6.0/howto/deployment/asgi/
+Le serveur ASGI utilisé est uvicorn :
+  uvicorn BackendRekoltHt.asgi:application --reload
 """
 
 import os
 
-from django.core.asgi import get_asgi_application
-from channels.routing import ProtocolTypeRouter, URLRouter
-from channels.auth import AuthMiddlewareStack
-# from channels.security.websocket import AllowedHostsOriginValidator
-from Api.routing import websocket_urlpatterns
+from django.core.asgi import get_asgi_application     # application Django standard pour les requêtes HTTP
+from channels.routing import ProtocolTypeRouter, URLRouter  # routage selon le protocole (http / websocket)
+from channels.auth import AuthMiddlewareStack          # middleware qui injecte l'utilisateur Django dans le scope WebSocket
+from Api.routing import websocket_urlpatterns          # liste des routes WebSocket définies dans Api/routing.py
 
+# pointer vers le fichier de configuration Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'BackendRekoltHt.settings')
 
+# ProtocolTypeRouter dirige chaque connexion vers le bon gestionnaire selon son type
 application = ProtocolTypeRouter({
+
+    # requêtes HTTP classiques → Django gère comme d'habitude
     'http': get_asgi_application(),
-    # 'websocket':AllowedHostsOriginValidator(
-    #     AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
-    'websocket':AuthMiddlewareStack(URLRouter(websocket_urlpatterns)
+
+    # connexions WebSocket → authentification Django + routage vers Api/routing.py
+    # AuthMiddlewareStack permet de lire le token de session pour identifier l'utilisateur WebSocket
+    # AllowedHostsOriginValidator est commenté pour faciliter le développement local
+    'websocket': AuthMiddlewareStack(
+        URLRouter(websocket_urlpatterns)
     ),
 })

@@ -1,34 +1,32 @@
-"""
-URL configuration for BackendRekoltHt project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
-from xml.etree.ElementInclude import include
-
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path, include
 
 urlpatterns = [
+
+    # ── INTERFACE D'ADMINISTRATION DJANGO ─────────────────────────────────────
+    # Accessible uniquement aux superutilisateurs via /admin/
     path('admin/', admin.site.urls),
+
+    # ── API PRINCIPALE (RekoltHt) ─────────────────────────────────────────────
+    # Routes définies dans RekoltHt/urls.py — ex: /api/test/
     path('api/', include("RekoltHt.urls")),
+
+    # ── AUTHENTIFICATION ET GESTION DES COMPTES ───────────────────────────────
+    # Routes définies dans Registration/urls.py
+    # Ex: /Registration/inscription/, /Registration/connexion/, /Registration/profil/…
     path('Registration/', include('Registration.urls')),
-    path('auth/',         include('social_django.urls', namespace='social')),
+
+    # ── AUTHENTIFICATION SOCIALE (Google OAuth2) ──────────────────────────────
+    # Géré par social-auth-app-django (social_django)
+    # Ex: /auth/login/google-oauth2/ → redirige vers la page de connexion Google
+    path('auth/', include('social_django.urls', namespace='social')),
 
 ]
 
-# servir les fichiers médias (photos de profil, etc.) en développement
+# ── FICHIERS MÉDIAS EN DÉVELOPPEMENT ──────────────────────────────────────────
+# En production, les fichiers médias (photos, logos) doivent être servis
+# par le serveur web (nginx, Render…). En développement, Django les sert directement.
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

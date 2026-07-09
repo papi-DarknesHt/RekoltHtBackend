@@ -1,41 +1,85 @@
-anyio==4.13.0
-asgiref==3.11.1
-certifi==2026.5.20
-cffi==2.0.0
-channels==4.3.2
-charset-normalizer==3.4.7
-click==8.4.1
-colorama==0.4.6
-coverage==7.14.1
-cryptography==48.0.0
-defusedxml==0.7.1
-Django==6.0.4
-django-cors-headers==4.9.0
-djangorestframework==3.17.1
-geographiclib==2.1
-geopy==2.4.1
-h11==0.16.0
-httptools==0.8.0
-idna==3.18
-numpy==2.4.4
-oauthlib==3.3.1
-pandas==3.0.3
-pillow==12.2.0
-psycopg2-binary==2.9.12
-pycparser==3.0
-PyJWT==2.13.0
-python-dateutil==2.9.0.post0
-python-dotenv==1.2.2
-python3-openid==3.2.0
-PyYAML==6.0.3
-requests==2.34.2
-requests-oauthlib==2.0.0
-six==1.17.0
-social-auth-app-django==5.9.0
-social-auth-core==4.9.1
-sqlparse==0.5.5
-tzdata==2026.1
-urllib3==2.7.0
-uvicorn==0.48.0
-watchfiles==1.2.0
-websockets==16.0
+# ══════════════════════════════════════════════════════════════════════════════
+#  REQUIREMENTS — RekoltHt Backend
+#  Installer : pip install -r requirements.txt
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── FRAMEWORK PRINCIPAL ───────────────────────────────────────────────────────
+Django==6.0.4                  # framework web principal
+asgiref==3.11.1                # couche ASGI requise par Django (async support)
+sqlparse==0.5.5                # parseur SQL utilisé en interne par Django
+
+
+# ── SERVEUR ASGI / WEBSOCKET ──────────────────────────────────────────────────
+uvicorn==0.48.0                # serveur ASGI pour lancer le projet (python -m uvicorn ...)
+channels==4.3.2                # support WebSocket dans Django (Django Channels)
+websockets==16.0               # bibliothèque WebSocket bas niveau (dépendance de channels)
+httptools==0.8.0               # parseur HTTP rapide (dépendance de uvicorn)
+watchfiles==1.2.0              # rechargement automatique du serveur en développement
+h11==0.16.0                    # implémentation HTTP/1.1 (dépendance de uvicorn)
+anyio==4.13.0                  # couche async/await compatible asyncio (dépendance de channels)
+
+
+# ── API REST ──────────────────────────────────────────────────────────────────
+djangorestframework==3.17.1    # Django Rest Framework — sérialisation et vues API
+django-cors-headers==4.9.0     # gestion des headers CORS (autorise les requêtes React → Django)
+
+
+# ── AUTHENTIFICATION GOOGLE OAUTH2 ────────────────────────────────────────────
+social-auth-app-django==5.9.0  # intégration Django de social-auth (Google, GitHub, etc.)
+social-auth-core==4.9.1        # moteur central de social-auth (backends OAuth2)
+oauthlib==3.3.1                # implémentation du protocole OAuth1/OAuth2
+requests-oauthlib==2.0.0       # couche OAuth2 pour la bibliothèque requests
+python3-openid==3.2.0          # support OpenID (dépendance de social-auth)
+defusedxml==0.7.1              # parsing XML sécurisé (dépendance de social-auth)
+PyJWT==2.13.0                  # encode/décode les JSON Web Tokens (JWT)
+
+
+# ── BASE DE DONNÉES ────────────────────────────────────────────────────────────
+psycopg2-binary==2.9.12        # adaptateur PostgreSQL (production sur Render/Heroku)
+# SQLite est inclus dans Python — aucun package supplémentaire requis pour le développement
+
+
+# ── FICHIERS MÉDIAS / IMAGES ──────────────────────────────────────────────────
+pillow==12.2.0                 # traitement d'images (ImageField Django, redimensionnement, etc.)
+
+
+# ── GÉOLOCALISATION ────────────────────────────────────────────────────────────
+geopy==2.4.1                   # calcul de distances GPS entre deux coordonnées (models.py)
+geographiclib==2.1             # bibliothèque mathématique géodésique (dépendance de geopy)
+
+
+# ── HTTP / REQUÊTES EXTERNES ───────────────────────────────────────────────────
+requests==2.34.2               # appels HTTP vers l'API Google OAuth2 (views.py)
+urllib3==2.7.0                 # client HTTP bas niveau (dépendance de requests)
+certifi==2026.5.20             # certificats CA pour les connexions HTTPS
+charset-normalizer==3.4.7      # détection de l'encodage des réponses HTTP (dépendance de requests)
+idna==3.18                     # gestion des noms de domaine internationalisés (dépendance de requests)
+
+
+# ── SÉCURITÉ / CRYPTOGRAPHIE ──────────────────────────────────────────────────
+cryptography==48.0.0           # opérations cryptographiques (dépendance de social-auth)
+cffi==2.0.0                    # interface Python → C (dépendance de cryptography)
+pycparser==3.0                 # parseur C en Python (dépendance de cffi)
+
+
+# ── CONFIGURATION / ENVIRONNEMENT ─────────────────────────────────────────────
+python-dotenv==1.2.2           # charge les variables d'environnement depuis le fichier .env
+
+
+# ── DONNÉES / UTILITAIRES ─────────────────────────────────────────────────────
+python-dateutil==2.9.0.post0   # manipulation avancée des dates (dépendance de pandas)
+six==1.17.0                    # compatibilité Python 2/3 (dépendance legacy de certaines libs)
+PyYAML==6.0.3                  # parsing YAML (dépendance de social-auth-core)
+tzdata==2026.1                 # base de données des fuseaux horaires (requis sur Windows/Docker)
+colorama==0.4.6                # couleurs dans le terminal sur Windows (dépendance de click/uvicorn)
+click==8.4.1                   # parsing d'arguments CLI (dépendance de uvicorn)
+
+
+# ── ANALYSE DE DONNÉES (optionnel) ────────────────────────────────────────────
+numpy==2.4.4                   # calculs numériques (dépendance de pandas)
+pandas==3.0.3                  # manipulation de données tabulaires (rapports / exports futurs)
+
+
+# ── TESTS / COUVERTURE ────────────────────────────────────────────────────────
+coverage==7.14.1               # mesure la couverture de code lors des tests (python -m coverage run)

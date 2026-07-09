@@ -1,16 +1,21 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from Api.broadcast import broadcast
-from .models import Utilisateur, Profil
+from .models import Utilisateur, Entreprise, Profil
 
 
 # ── CRÉER LE PROFIL AUTOMATIQUEMENT ──────────────────────────────────────────
-# Déclenché automatiquement après chaque création d'un Utilisateur
+# Déclenché après chaque création d'un compte : Utilisateur (ou Entreprise, qui
+# en hérite via une table distincte et envoie donc son propre signal post_save).
+# Vendeur/Acheteur sont des proxys de Utilisateur : ils partagent son signal.
 @receiver(post_save, sender=Utilisateur)
+@receiver(post_save, sender=Entreprise)
 def creer_profil(sender, instance, created, **kwargs):
     """
-    Crée un Profil vide automatiquement quand un Utilisateur est créé.
+    Crée un Profil vide automatiquement quand un compte est créé.
     Garantit que chaque utilisateur a toujours un profil.
+    Une Entreprise démarre 'acheteur' comme n'importe quel compte — elle peut
+    ensuite devenir 'vendeur' via Profil.convertir_en_vendeur().
     """
     if created:
         Profil.objects.create(utilisateur=instance)
@@ -19,6 +24,7 @@ def creer_profil(sender, instance, created, **kwargs):
 # ── BROADCAST WEBSOCKET — NOUVEL UTILISATEUR ─────────────────────────────────
 # Notifie React en temps réel quand un utilisateur est créé ou modifié
 @receiver(post_save, sender=Utilisateur)
+@receiver(post_save, sender=Entreprise)
 def broadcast_utilisateur(sender, instance, created, **kwargs):
     """
     Envoie une notification WebSocket au frontend React

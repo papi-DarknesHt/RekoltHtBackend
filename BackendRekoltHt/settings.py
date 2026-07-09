@@ -55,6 +55,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -62,6 +63,12 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+# configuration WhiteNoise
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+STATIC_URL          = '/static/'
+STATIC_ROOT         = os.path.join(BASE_DIR, 'staticfiles')
+
 # autoriser la communication entre react et django
 CORS_ALLOWED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com"]
 CORS_ALLOW_CREDENTIALS = True
@@ -98,6 +105,7 @@ ROOT_URLCONF = 'BackendRekoltHt.urls'
 # Google OAuth
 AUTHENTICATION_BACKENDS = [
     'social_core.backends.google.GoogleOAuth2',
+    'django.contrib.auth.backends.ModelBackend',
 ]
 SECURE_CROSS_ORIGIN_OPENER_POLICY = None
 
@@ -174,7 +182,8 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL  = '/static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 # Fichiers médias (photos de profil, etc.)
 MEDIA_URL  = '/media/'
@@ -183,3 +192,12 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # les photos/logos sont envoyées en base64 dans le JSON (~+33% de taille) — la limite
 # par défaut de Django (~2.6 Mo) est donc trop basse pour les images de 5 Mo annoncées au frontend
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024  # 10 Mo
+
+# ── CONFIGURATION EMAIL ───────────────────────────────────────────────────────
+EMAIL_BACKEND       = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST          = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT          = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS       = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER     = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL  = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
