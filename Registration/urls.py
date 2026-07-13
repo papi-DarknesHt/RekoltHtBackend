@@ -28,8 +28,14 @@ urlpatterns = [
     path('entreprise/supprimer/',      views.supprimerEntreprise),      # DELETE — supprimer une entreprise
     path('entreprise/supprimer-logo/', views.supprimerLogoEntreprise),  # DELETE — supprimer uniquement le logo
 
+    # ── VÉRIFICATION VENDEUR (KYC) ────────────────────────────────────────────
+    path('verification/soumettre/',    views.soumettre_verification),  # POST — soumettre/mettre à jour le dossier KYC
+    path('verification/statut/',       views.statut_verification),     # GET  — statut courant + motif d'échec
+    path('verification/previsualiser/', views.previsualiser_contrat),  # POST — aperçu PDF du contrat, avant envoi définitif
+
     # ── ADMINISTRATION ────────────────────────────────────────────────────────
     path('admin/utilisateurs/', views.listerUtilisateursAdmin),   # GET — liste tous les utilisateurs (rôle admin requis)
+    path('admin/verifications-entreprise/', views.lister_demandes_admin),  # GET — demandes entreprise en attente (rôle admin requis)
 
     # ── RÉINITIALISATION DU MOT DE PASSE ─────────────────────────────────────
     path('reinitialisation/demander/',      views.demanderReinitialisation),      # POST — envoyer le code PIN par email

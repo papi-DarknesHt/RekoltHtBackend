@@ -25,6 +25,12 @@ djangorestframework==3.17.1    # Django Rest Framework — sérialisation et vue
 django-cors-headers==4.9.0     # gestion des headers CORS (autorise les requêtes React → Django)
 
 
+# ── FICHIERS STATIQUES ─────────────────────────────────────────────────────────
+# utilisé dans MIDDLEWARE et STATICFILES_STORAGE (BackendRekoltHt/settings/base.py)
+# mais manquait de requirements.txt — runserver plante sinon (ModuleNotFoundError)
+whitenoise==6.12.0             # sert les fichiers statiques directement depuis Django (pas de serveur web séparé requis)
+
+
 # ── AUTHENTIFICATION GOOGLE OAUTH2 ────────────────────────────────────────────
 social-auth-app-django==5.9.0  # intégration Django de social-auth (Google, GitHub, etc.)
 social-auth-core==4.9.1        # moteur central de social-auth (backends OAuth2)
@@ -42,6 +48,39 @@ psycopg2-binary==2.9.12        # adaptateur PostgreSQL (production sur Render/He
 
 # ── FICHIERS MÉDIAS / IMAGES ──────────────────────────────────────────────────
 pillow==12.2.0                 # traitement d'images (ImageField Django, redimensionnement, etc.)
+
+
+# ── STOCKAGE MÉDIA EXTERNE (PRODUCTION) ───────────────────────────────────────
+# MEDIA_ROOT (disque local) ne survit pas aux redéploiements sur Render (fs
+# éphémère) : les fichiers médias (photos_profil/, logos_entreprise/) sont donc
+# stockés sur Cloudinary en prod — voir BackendRekoltHt/settings/prod.py
+django-cloudinary-storage==0.3.0  # backend de stockage Django pour Cloudinary (DEFAULT_FILE_STORAGE en prod)
+cloudinary==1.45.0                 # SDK Cloudinary — lit CLOUDINARY_URL automatiquement depuis l'environnement
+
+
+# ── OCR ET VISION ──────────────────────────────────────────────────────────────
+# extraction des informations depuis les pièces d'identité / certificats de
+# patente (Registration/services/ocr_service.py, étape 02 de soumettre_verification)
+paddleocr==2.9.1                   # OCR (détection + reconnaissance de texte)
+paddlepaddle==2.6.2                # moteur de deep learning requis par PaddleOCR
+opencv-python-headless==4.10.0.84  # traitement d'image (dépendance de PaddleOCR, sans libs GUI)
+# La vérification faciale (étape 04, Registration/services/face_service.py) tourne
+# dans un environnement Python SÉPARÉ (deepface/tensorflow, voir requirements-face.txt)
+# — protobuf>=6.31.1 y est requis, incompatible avec paddlepaddle ci-dessus
+# (protobuf<=3.20.2) dans le même environnement (vérifié : import paddle échoue sinon).
+
+
+# ── SCRAPING / AUTOMATISATION NAVIGATEUR ──────────────────────────────────────
+# vérification automatique d'une entreprise sur le registre public du MCI
+# (Registration/services/patente_service.py, étape 05 de soumettre_verification)
+playwright==1.61.0   # après pip install, exécuter : playwright install chromium
+                      # (télécharge le binaire Chromium, non inclus dans le package pip)
+
+
+# ── GÉNÉRATION DE DOCUMENTS (PDF) ──────────────────────────────────────────────
+# contrat vendeur signé électroniquement, généré quand une demande de
+# vérification est validée (Registration/services/contrat_service.py)
+reportlab==4.2.5                   # génération de PDF (reportlab.platypus)
 
 
 # ── GÉOLOCALISATION ────────────────────────────────────────────────────────────
@@ -77,7 +116,11 @@ click==8.4.1                   # parsing d'arguments CLI (dépendance de uvicorn
 
 
 # ── ANALYSE DE DONNÉES (optionnel) ────────────────────────────────────────────
-numpy==2.4.4                   # calculs numériques (dépendance de pandas)
+# numpy<2.0 : paddleocr==2.9.1 (voir section OCR ET VISION) plante au chargement
+# avec numpy 2.x (AttributeError: np.sctypes was removed in the NumPy 2.0
+# release), via sa dépendance imgaug — vérifié à l'installation. 1.26.4 reste
+# compatible avec pandas==3.0.3 (qui accepte numpy>=1.26.0).
+numpy==1.26.4                  # calculs numériques (dépendance de pandas ET de paddleocr)
 pandas==3.0.3                  # manipulation de données tabulaires (rapports / exports futurs)
 
 

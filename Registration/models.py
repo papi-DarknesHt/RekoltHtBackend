@@ -292,6 +292,175 @@ class Entreprise(Utilisateur):
         return geodesic(coord1, coord2).kilometers
 
 
+# ── MODÈLE DEMANDE DE VÉRIFICATION ────────────────────────────────────────────
+class DemandeVerification(models.Model):
+    """
+    Dossier de vérification d'identité (KYC), unique par Utilisateur (OneToOne).
+    Couvre à la fois le flux individuel (pièce d'identité + selfie) et le flux
+    entreprise (patente) via type_demandeur, pour éviter de dupliquer un statut
+    de vérification séparément dans Profil et dans Entreprise.
+    """
+
+    # type de demandeur : détermine si les champs "individuel" ou "entreprise" ci-dessous s'appliquent
+    TYPE_DEMANDEUR = [
+        ('individuel', 'Individuel'),
+        ('entreprise', 'Entreprise'),
+    ]
+
+    # type de pièce d'identité fournie (individuel uniquement)
+    TYPE_DOCUMENT = [
+        ('passeport', 'Passeport'),
+        ('permis',    'Permis de conduire'),
+        ('cin',       "Carte d'identité"),
+    ]
+
+    # avancement du traitement de la demande
+    STATUTS = [
+        ('en_attente',          'En attente'),
+        ('en_attente_manuelle', 'En attente de revue manuelle'),  # pipeline auto incomplet (ex: guichet.mci.ht indisponible) — voir _verifier_patente_mci
+        ('verifie',             'Vérifié'),
+        ('echoue',              'Échoué'),
+    ]
+
+    utilisateur = models.OneToOneField(
+                    Utilisateur,
+                    on_delete    = models.CASCADE,
+                    related_name = 'demande_verification'
+                  )
+
+    type_demandeur = models.CharField(max_length=20, choices=TYPE_DEMANDEUR)
+
+    type_document = models.CharField(max_length=20, choices=TYPE_DOCUMENT, blank=True, null=True)  # individuel uniquement
+
+    # identifiant de la pièce SAISI par l'utilisateur (pas extrait par OCR) :
+    # Paspò nimewo/N° Passeport (passeport), Numéro de carte/Nimewo kat la
+    # (CIN), NIF (permis), Numéro de patente (entreprise) — comparé à la
+    # valeur extraite par OCR et vérifié unique tous comptes confondus (une
+    # pièce ne peut créer qu'un seul compte), voir soumettre_verification
+    numero_piece_saisi = models.CharField(max_length=100, blank=True, null=True)
+
+    document_recto = models.ImageField(upload_to='verification/documents/', blank=True, null=True)
+    document_verso = models.ImageField(upload_to='verification/documents/', blank=True, null=True)  # CIN uniquement
+    selfie         = models.ImageField(upload_to='verification/selfies/', blank=True, null=True)    # individuel uniquement, jamais un upload existant (liveness côté front)
+
+    # justificatif entreprise
+    certificat_patente     = models.FileField(upload_to='verification/patentes/', blank=True, null=True)  # entreprise uniquement (PDF ou image)
+    numero_patente_extrait = models.CharField(max_length=100, blank=True, null=True)                      # extrait par OCR, étape 03
+
+    # infos extraites par OCR (étape 03)
+    nom_extrait             = models.CharField(max_length=150, blank=True, null=True)
+    prenom_extrait          = models.CharField(max_length=150, blank=True, null=True)
+    numero_piece_extrait    = models.CharField(max_length=100, blank=True, null=True)
+    date_naissance_extraite = models.DateField(blank=True, null=True)
+    donnees_ocr_brutes      = models.JSONField(blank=True, null=True)  # JSONField, pas ArrayField (compatible SQLite/PostgreSQL, voir étape 00)
+
+    # résultat vérification faciale (étape 04, individuel uniquement)
+    score_correspondance_visage = models.FloatField(blank=True, null=True)
+
+    statut      = models.CharField(max_length=20, choices=STATUTS, default='en_attente')
+    motif_echec = models.TextField(blank=True, null=True)
+
+    contrat_pdf = models.FileField(upload_to='verification/contrats/', blank=True, null=True)  # généré à l'étape 06
+
+    date_soumission = models.DateTimeField(auto_now_add=True)
+    date_traitement = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table            = 'demande_verification'
+        verbose_name        = 'Demande de vérification'
+        verbose_name_plural = 'Demandes de vérification'
+        ordering            = ['-date_soumission']
+
+    def __str__(self):
+        return f"Demande {self.type_demandeur} de {self.utilisateur.email} — {self.statut}"
+
+    def marquer_verifie(self):
+        """
+        Marque la demande comme vérifiée, promeut le compte au rôle 'vendeur',
+        horodate le traitement, génère le contrat vendeur (PDF signé
+        électroniquement) et l'envoie par email en pièce jointe. Appelée par
+        le pipeline de vérification automatique ou par
+        DemandeVerificationAdmin.valider_selectionnees (Registration/admin.py).
+        """
+        self.statut = 'verifie'
+        self.date_traitement = timezone.now()
+
+        # la vérification KYC validée est ce qui autorise le passage
+        # acheteur → vendeur (Entreprise démarre aussi 'acheteur', voir
+        # Profil.convertir_en_vendeur) — jamais l'inverse, le rôle ne doit pas
+        # changer tant que la demande n'est pas explicitement vérifiée
+        if self.utilisateur.profil.role != 'vendeur':
+            self.utilisateur.profil.convertir_en_vendeur()
+
+        # imports différés : Registration.services.contrat_service importe ce
+        # même module (Entreprise/DemandeVerification) — un import en tête de
+        # fichier créerait un import circulaire au chargement de models.py
+        from django.conf import settings
+        from django.core.files.base import ContentFile
+        from django.core.mail import EmailMessage
+        from .services.contrat_service import generer_contrat
+
+        pdf_bytes   = generer_contrat(self).read()
+        nom_fichier = f"contrat_{self.id}.pdf"
+        self.contrat_pdf.save(nom_fichier, ContentFile(pdf_bytes), save=False)
+        self.save()
+
+        nom_complet = f"{self.utilisateur.prenom} {self.utilisateur.nom}".strip()
+        email = EmailMessage(
+            subject    = "Votre vérification RekoltHt est validée",
+            body       = (
+                f"Bonjour {nom_complet},\n\n"
+                "Votre demande de vérification a été validée. Vous trouverez "
+                "ci-joint votre contrat vendeur.\n\n"
+                "L'équipe RekoltHt"
+            ),
+            from_email = settings.DEFAULT_FROM_EMAIL,
+            to         = [self.utilisateur.email],
+        )
+        email.attach(nom_fichier, pdf_bytes, 'application/pdf')
+        # le statut est déjà enregistré (self.save() ci-dessus) : un email qui
+        # échoue (SMTP mal configuré, panne temporaire...) ne doit jamais faire
+        # perdre le résultat de la vérification elle-même, ni renvoyer une
+        # erreur 500 au frontend qui attend juste la confirmation du statut
+        try:
+            email.send(fail_silently=False)
+        except Exception as e:
+            print(f"ERREUR envoi email de validation (demande {self.id}) :", e)
+
+    def marquer_echoue(self, motif):
+        """
+        Marque la demande comme échouée avec le motif fourni, horodate le
+        traitement et envoie un email expliquant le motif d'échec.
+        """
+        self.statut = 'echoue'
+        self.motif_echec = motif
+        self.date_traitement = timezone.now()
+        self.save()
+
+        from django.conf import settings   # import différé, voir marquer_verifie
+        from django.core.mail import send_mail
+
+        nom_complet = f"{self.utilisateur.prenom} {self.utilisateur.nom}".strip()
+        # le statut est déjà enregistré (self.save() ci-dessus) : voir
+        # marquer_verifie() pour la raison de ce try/except
+        try:
+            send_mail(
+                subject        = "Votre vérification RekoltHt a échoué",
+                message        = (
+                    f"Bonjour {nom_complet},\n\n"
+                    "Votre demande de vérification n'a pas pu être validée.\n\n"
+                    f"Motif : {motif}\n\n"
+                    "Vous pouvez soumettre une nouvelle demande à tout moment.\n\n"
+                    "L'équipe RekoltHt"
+                ),
+                from_email     = settings.DEFAULT_FROM_EMAIL,
+                recipient_list = [self.utilisateur.email],
+                fail_silently  = False,
+            )
+        except Exception as e:
+            print(f"ERREUR envoi email d'échec (demande {self.id}) :", e)
+
+
 # ── MODÈLE CODE DE RÉINITIALISATION ──────────────────────────────────────────
 class CodeReinitialisation(models.Model):
     """Code PIN à 4 chiffres envoyé par email pour réinitialiser un mot de passe."""

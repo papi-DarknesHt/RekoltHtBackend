@@ -96,14 +96,20 @@ BackendRekoltHt/
 ├── db.sqlite3                  # Base de données SQLite (développement)
 ├── manage.py                   # Utilitaire CLI Django
 ├── requirements.txt            # Dépendances Python du projet
-├── .env                         # Variables d'environnement (secrets, non commité)
-├── .env.example                 # Modèle des variables attendues dans .env
-├── .gitignore                   # Fichiers/dossiers exclus de Git (.env, db.sqlite3, ...)
+├── .env.dev                     # Variables d'environnement dev (secrets, non commité)
+├── .env.prod                    # Variables d'environnement prod (secrets, non commité, local uniquement)
+├── .env.dev.example              # Modèle des variables attendues dans .env.dev
+├── .env.prod.example             # Modèle des variables attendues dans .env.prod
+├── .gitignore                   # Fichiers/dossiers exclus de Git (.env*, db.sqlite3, ...)
 ├── README.txt                  # Ce fichier
 │
 ├── BackendRekoltHt/           # Configuration principale du projet Django
 │   ├── __init__.py
-│   ├── settings.py            # Configuration et paramètres globaux
+│   ├── settings/               # Package de configuration (dev / prod)
+│   │   ├── __init__.py         # vide
+│   │   ├── base.py             # Réglages communs aux deux environnements
+│   │   ├── dev.py              # DEBUG=True, SQLite, médias en local
+│   │   └── prod.py             # DEBUG=False, PostgreSQL, médias sur Cloudinary
 │   ├── urls.py                # Routes URL principales
 │   ├── asgi.py                # Configuration ASGI pour Channels/WebSocket
 │   └── wsgi.py                # Configuration WSGI (déploiement)
@@ -181,20 +187,22 @@ requirements.txt
   Contenu: Noms et versions des packages nécessaires
   Installation: pip install -r requirements.txt
 
-.env
-  Description: Variables d'environnement sensibles (SECRET_KEY, identifiants
-  OAuth2 Google, ...)
-  Note: Fichier non commité (voir .gitignore) — chargé au démarrage par
-  settings.py via python-dotenv (load_dotenv)
+.env.dev / .env.prod
+  Description: Variables d'environnement sensibles par environnement
+  (SECRET_KEY, identifiants OAuth2 Google, SMTP, base PostgreSQL, Cloudinary...)
+  Note: Fichiers non commités (voir .gitignore) — chargés au démarrage par
+  BackendRekoltHt/settings/dev.py ou prod.py via python-dotenv (load_dotenv).
+  Sur Render, .env.prod n'existe pas : les vraies variables d'environnement du
+  tableau de bord Render sont utilisées directement.
 
-.env.example
-  Description: Modèle listant les variables attendues dans .env, avec des
-  valeurs vides/placeholder
-  Utilisation: Copier en .env puis renseigner les vraies valeurs
+.env.dev.example / .env.prod.example
+  Description: Modèles listant les variables attendues dans .env.dev/.env.prod,
+  avec des valeurs vides/placeholder
+  Utilisation: Copier en .env.dev (ou .env.prod) puis renseigner les vraies valeurs
 
 .gitignore
   Description: Liste des fichiers/dossiers exclus du suivi Git
-  Contenu: .env, db.sqlite3, media/, __pycache__/, htmlcov/, .idea/, ...
+  Contenu: .env, .env.dev, .env.prod, db.sqlite3, media/, __pycache__/, htmlcov/, .idea/, ...
 
 
 DOSSIER BackendRekoltHt/ (Configuration Principale)
@@ -204,19 +212,16 @@ __init__.py
   Description: Marqueur de package Python (peut être vide)
   Utilité: Indique à Python que le dossier est un package
 
-settings.py
-  Description: Configuration centralisée du projet Django
-  Contient:
-    - Chargement des variables d'environnement depuis .env (python-dotenv)
-    - Configuration de la base de données (db.sqlite3)
-    - Applications installées (Api, Registration, RekoltHt, Produits)
-    - Middleware pour sécurité et traitements HTTP
-    - Configuration CORS pour communiquer avec React (localhost:5173)
-    - Paramètres REST Framework (authentification par tokens)
-    - Configuration ASGI/Channels pour WebSocket
-    - Configuration des templates et contextes
-    - SECRET_KEY et identifiants Google OAuth2 lus depuis .env
-  Note critique: NE PAS MODIFIER en production sans mesures de sécurité
+settings/ (package)
+  Description: Configuration du projet Django, scindée en dev/prod pour éviter
+  de dupliquer le code commun (voir "CONFIGURATION IMPORTANTE" plus bas)
+  - base.py: INSTALLED_APPS, MIDDLEWARE, CORS, REST_FRAMEWORK, ASGI/Channels,
+    AUTHENTICATION_BACKENDS, TEMPLATES, AUTH_PASSWORD_VALIDATORS, email SMTP
+  - dev.py: DEBUG=True, base SQLite (db.sqlite3), médias sur disque local
+  - prod.py: DEBUG=False, base PostgreSQL (variables DB_*), médias sur
+    Cloudinary, ALLOWED_HOSTS depuis l'environnement
+  Note critique: prod.py documente les pièges SQLite/PostgreSQL (ArrayField,
+  précision GPS, stockage médias) — à lire avant tout déploiement
 
 urls.py
   Description: Routeur principal des URLs du projet
@@ -491,10 +496,15 @@ migrations/
   Description: Migrations de base de données
 
 
-CONFIGURATION IMPORTANTE (settings.py)
+CONFIGURATION IMPORTANTE (settings/)
 ================================================================================
+Depuis la restructuration en package, la configuration est scindée en
+BackendRekoltHt/settings/ (base.py commun + dev.py + prod.py) — voir la
+section dédiée plus haut. La variable d'environnement DJANGO_SETTINGS_MODULE
+détermine l'environnement actif (défaut: BackendRekoltHt.settings.dev, voir
+manage.py/asgi.py/wsgi.py).
 
-APPLICATIONS INSTALLÉES:
+APPLICATIONS INSTALLÉES (base.py, + Cloudinary en prod uniquement):
   - channels: Support WebSocket
   - django.contrib.admin: Interface admin
   - django.contrib.auth: Authentification Django
@@ -509,6 +519,7 @@ APPLICATIONS INSTALLÉES:
   - Produits: Produits
   - Registration: Authentification
   - social_django: Authentification sociale (Google OAuth2)
+  - cloudinary_storage, cloudinary: stockage des médias (prod.py uniquement)
 
 CORS (Cross-Origin Resource Sharing):
   - Origin autorisée: http://localhost:5173 (React)
@@ -530,18 +541,28 @@ AUTHENTIFICATION GOOGLE (OAuth2):
   - SECURE_CROSS_ORIGIN_OPENER_POLICY: None (nécessaire pour la popup Google)
   - Route: /auth/ (social_django.urls)
 
-FICHIERS MÉDIAS (photos de profil):
-  - MEDIA_URL: /media/
-  - MEDIA_ROOT: BASE_DIR / media
-  - Servis automatiquement par Django uniquement si DEBUG = True
+FICHIERS MÉDIAS (photos de profil, logos):
+  - MEDIA_URL: /media/ (commun, défini dans base.py)
+  - Dev (dev.py): MEDIA_ROOT = BASE_DIR / media, servis par Django (DEBUG=True)
+  - Prod (prod.py): DEFAULT_FILE_STORAGE = Cloudinary (variable CLOUDINARY_URL)
+    — MEDIA_ROOT n'est PAS utilisé car le filesystem de Render est éphémère
+    (tout fichier écrit sur disque est perdu à chaque redéploiement)
 
 WEBSOCKET:
   - Backend: InMemoryChannelLayer (à remplacer par Redis en production)
   - Type: Asynchrone (async)
 
 BASE DE DONNÉES:
-  - Engine: sqlite3
-  - Name: db.sqlite3
+  - Dev (dev.py): sqlite3 (db.sqlite3)
+  - Prod (prod.py): PostgreSQL, via DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT
+  - Attention: ArrayField n'existe pas sous SQLite — utiliser JSONField pour
+    tout futur champ "liste" (ex: categories_produits). Détail complet dans
+    BackendRekoltHt/settings/prod.py
+
+ALLOWED_HOSTS:
+  - Dev (dev.py): localhost, 127.0.0.1 (codé en dur)
+  - Prod (prod.py): lu depuis la variable d'environnement ALLOWED_HOSTS (liste
+    séparée par des virgules), défaut: rekolthtbackend.onrender.com
 
 
 FLUX D'AUTHENTIFICATION
@@ -708,13 +729,14 @@ DÉMARRAGE DU PROJET
 1. INSTALLATION:
    pip install -r requirements.txt
 
-2. VARIABLES D'ENVIRONNEMENT:
-   Copier .env.example vers .env et renseigner les valeurs réelles
-   (SECRET_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET)
-   cp .env.example .env
+2. VARIABLES D'ENVIRONNEMENT (développement):
+   Copier .env.dev.example vers .env.dev et renseigner les valeurs réelles
+   (SECRET_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET, ...)
+   cp .env.dev.example .env.dev
 
 3. MIGRATIONS:
    python manage.py migrate
+   (utilise BackendRekoltHt.settings.dev par défaut, voir manage.py)
 
 4. CRÉER UN SUPER-UTILISATEUR (optionnel):
    python manage.py createsuperuser
@@ -726,6 +748,13 @@ DÉMARRAGE DU PROJET
 
 6. ACCÈS ADMIN:
    http://localhost:8000/admin/
+
+7. DÉPLOIEMENT EN PRODUCTION (Render):
+   Renseigner SECRET_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_KEY/SECRET, EMAIL_*, DB_*
+   et CLOUDINARY_URL dans le tableau de bord Render (voir .env.prod.example),
+   puis définir DJANGO_SETTINGS_MODULE=BackendRekoltHt.settings.prod.
+   Avant tout déploiement, vérifier qu'aucune migration n'est manquante :
+     python manage.py migrate --check --settings=BackendRekoltHt.settings.prod
 
 
 STRUCTURE DES RELATIONS DE DONNÉES

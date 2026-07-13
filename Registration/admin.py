@@ -1,5 +1,8 @@
 from django.contrib import admin
-from .models import Utilisateur, Vendeur, Acheteur, Profil, Entreprise, CodeReinitialisation, Token
+from .models import (
+    Utilisateur, Vendeur, Acheteur, Profil, Entreprise,
+    DemandeVerification, CodeReinitialisation, Token,
+)
 
 
 # ── UTILISATEUR ───────────────────────────────────────────────────────────────
@@ -57,6 +60,30 @@ class EntrepriseAdmin(admin.ModelAdmin):
     list_filter   = ('secteur', 'est_verifiee', 'statut_verification', 'pays')
     search_fields = ('nom_Entreprise', 'num_Enregistrement', 'email')
     ordering      = ('id',)
+
+
+# ── DEMANDE DE VÉRIFICATION ───────────────────────────────────────────────────
+# Dashboard léger sans écran custom : les actions groupées ci-dessous permettent
+# de valider/rejeter des demandes directement depuis la liste de l'admin.
+@admin.register(DemandeVerification)
+class DemandeVerificationAdmin(admin.ModelAdmin):
+    list_display  = ('utilisateur', 'type_demandeur', 'statut', 'numero_patente_extrait', 'date_soumission')
+    list_filter   = ('statut', 'type_demandeur')
+    search_fields = ('utilisateur__email', 'numero_piece_extrait', 'numero_patente_extrait')
+    ordering      = ('-date_soumission',)
+    actions       = ['valider_selectionnees', 'rejeter_selectionnees']
+
+    @admin.action(description="Valider les demandes sélectionnées")
+    def valider_selectionnees(self, request, queryset):
+        for demande in queryset:
+            demande.marquer_verifie()
+        self.message_user(request, f"{queryset.count()} demande(s) validée(s).")
+
+    @admin.action(description="Rejeter les demandes sélectionnées")
+    def rejeter_selectionnees(self, request, queryset):
+        for demande in queryset:
+            demande.marquer_echoue("Rejeté manuellement par un administrateur")
+        self.message_user(request, f"{queryset.count()} demande(s) rejetée(s).")
 
 
 # ── CODE DE RÉINITIALISATION ──────────────────────────────────────────────────
