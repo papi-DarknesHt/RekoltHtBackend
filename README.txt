@@ -54,6 +54,89 @@ FONCTIONNALITÉS PRINCIPALES
    - Vérification du token Google auprès de l'API userinfo de Google
    - Création automatique du profil associé (rôle par défaut: acheteur)
 
+6. VÉRIFICATION VENDEUR / KYC — NOUVEAU SUR CETTE BRANCHE (Features/become-seller)
+   ─────────────────────────────────────────────────────────────────────────────
+   Permet à un compte (individuel ou entreprise) de soumettre un dossier de
+   vérification d'identité et de devenir vendeur automatiquement si tout
+   concorde — sans étape de "revue manuelle" indéfinie : le pipeline conclut
+   toujours vérifié ou échoué (avec la cause précise).
+
+   Modèle (Registration/models.py) :
+     - DemandeVerification (OneToOne avec Utilisateur) — couvre à la fois le
+       flux individuel (pièce d'identité + selfie) et entreprise (certificat
+       de patente), pour éviter de dupliquer un statut de vérification séparé
+       dans Profil et dans Entreprise.
+     - Champs clés : type_demandeur, type_document, document_recto/verso,
+       selfie, numero_piece_saisi (saisi par l'utilisateur), certificat_patente,
+       numero_patente_extrait, nom_extrait/prenom_extrait/numero_piece_extrait
+       (par OCR), donnees_ocr_brutes (JSON), score_correspondance_visage,
+       statut (en_attente / verifie / echoue), motif_echec, contrat_pdf.
+     - DemandeVerification.marquer_verifie() : promeut automatiquement le
+       compte au rôle 'vendeur' (Profil.convertir_en_vendeur), génère le
+       contrat PDF signé électroniquement et l'envoie par email.
+     - DemandeVerification.marquer_echoue(motif) : horodate l'échec et envoie
+       un email expliquant le motif exact.
+
+   Pipeline automatique (Registration/views.py, soumettre_verification) :
+     1. Unicité inter-comptes : un document déjà utilisé par un AUTRE compte
+        (dont la demande n'a pas échoué) est rejeté avant même l'OCR.
+     2. OCR (Registration/services/ocr_service.py, PaddleOCR) : extrait
+        nom/prénom/numéro de pièce (individuel) ou nom d'entreprise/numéro de
+        patente (entreprise) — extraction par POSITION des boîtes détectées
+        (pas seulement l'ordre séquentiel du texte), avec repli sur une
+        correspondance de sous-chaîne tolérante aux fusions/pluriels
+        introduits par l'OCR (ex: "Siyati/Nom" lu "SiyatilNom").
+     3. Cross-vérification : nom/prénom (ou nom d'entreprise) et numéro saisi
+        comparés aux valeurs extraites — normalisés (accents/espaces/casse
+        ignorés) mais comparaison EXACTE sur le numéro (pas de tolérance
+        floue, décision produit assumée).
+     4. Vérification faciale (individuel uniquement, Registration/services/
+        face_service.py + face_worker.py) : compare le selfie à la photo de
+        la pièce via DeepFace (modèle Facenet, detector_backend="retinaface").
+     5. Vérification patente (entreprise uniquement, Registration/services/
+        patente_service.py, Playwright) : croise le nom d'entreprise avec le
+        registre public guichet.mci.ht (recherche par NOM uniquement, pas par
+        numéro — vérifié empiriquement) et confirme le numéro de patente.
+     6. Aucun état de "revue manuelle" automatique : toute indisponibilité
+        d'infrastructure (DeepFace non configuré, guichet.mci.ht injoignable)
+        conclut désormais en 'echoue' avec la cause exacte, jamais en attente
+        indéfinie.
+
+   Point d'architecture critique — deux environnements Python séparés :
+     DeepFace (TensorFlow, protobuf>=6.31.1) est incompatible avec paddleocr/
+     paddlepaddle (protobuf<=3.20.2) dans le même environnement — vérifié :
+     les deux plantent installés côte à côte. DeepFace tourne donc dans un
+     second venv dédié (voir requirements-face.txt, non inclus dans
+     requirements.txt), appelé via subprocess (face_worker.py) et jamais
+     importé directement dans le processus Django. Chemin renseigné via la
+     variable d'environnement FACE_VENV_PYTHON (.env.dev/.env.prod) — si
+     absente, la vérification faciale automatique échoue proprement avec un
+     motif clair plutôt que de planter.
+
+   Endpoints (Registration/urls.py) :
+     - POST /Registration/verification/soumettre/     → soumettre/mettre à jour le dossier KYC (multipart)
+     - GET  /Registration/verification/statut/         → statut courant + motif d'échec + lien du contrat
+     - POST /Registration/verification/previsualiser/  → génère un aperçu du contrat PDF sans rien persister
+     - GET  /Registration/admin/verifications-entreprise/ → demandes entreprise en attente (rôle admin)
+
+   Contrat PDF (Registration/services/contrat_service.py, reportlab) :
+     photo (selfie ou logo entreprise), identité, type de pièce fourni et son
+     numéro, photo du document lui-même, conditions générales, mention de
+     signature électronique.
+
+   Admin Django (Registration/admin.py) : DemandeVerificationAdmin avec
+   actions groupées valider_selectionnees / rejeter_selectionnees (appellent
+   marquer_verifie()/marquer_echoue() manuellement).
+
+   Notifications temps réel : signal broadcast_verification (Registration/
+   signals.py) émet "verification.updated" sur chaque changement de statut,
+   en plus de l'email — voir Api/broadcast.py (réutilisé tel quel).
+
+   Dépendances ajoutées à requirements.txt : paddleocr, paddlepaddle,
+   opencv-python-headless, playwright, reportlab, whitenoise (middleware déjà
+   utilisé mais absent du fichier — gap pré-existant corrigé). DeepFace/
+   TensorFlow sont dans requirements-face.txt séparément (voir plus haut).
+
 
 STACK TECHNOLOGIQUE
 ================================================================================
@@ -77,6 +160,16 @@ Bibliothèques Utilitaires:
   - NumPy 2.4.4 - Calculs numériques
   - Pillow 12.2.0 - Traitement des images (photos de profil)
   - psycopg2-binary 2.9.12 - Driver PostgreSQL (prêt pour la production)
+  - whitenoise - Sert les fichiers statiques directement depuis Django
+
+Vérification KYC (nouveau sur cette branche — voir section 6 plus haut):
+  - paddleocr / paddlepaddle - OCR des pièces d'identité et certificats
+  - opencv-python-headless - Traitement d'image (dépendance de paddleocr)
+  - playwright - Vérification du registre du Ministère du Commerce (MCI)
+  - reportlab - Génération du contrat vendeur (PDF)
+  - deepface / tensorflow (requirements-face.txt, venv séparé) - Vérification
+    faciale (selfie vs pièce d'identité), incompatible avec paddleocr dans le
+    même environnement (conflit protobuf)
 
 Authentification Google (OAuth2):
   - social-auth-app-django 5.9.0 - Intégration Django de l'authentification sociale
@@ -102,6 +195,8 @@ BackendRekoltHt/
 ├── .env.prod.example             # Modèle des variables attendues dans .env.prod
 ├── .gitignore                   # Fichiers/dossiers exclus de Git (.env*, db.sqlite3, ...)
 ├── README.txt                  # Ce fichier
+├── requirements-face.txt       # NOUVEAU — DeepFace/TensorFlow, venv séparé (voir section 6)
+│                                 (venv/, venv_face/ : environnements virtuels, non commités)
 │
 ├── BackendRekoltHt/           # Configuration principale du projet Django
 │   ├── __init__.py
@@ -126,15 +221,24 @@ BackendRekoltHt/
 ├── Registration/              # App pour l'inscription/authentification
 │   ├── __init__.py
 │   ├── apps.py                # Configuration de l'app Registration
-│   ├── models.py              # Modèles Utilisateur et Profil
-│   ├── views.py               # Vues API (sinscrire, seConnecter, etc.)
-│   ├── admin.py               # Configuration admin Django
-│   ├── signals.py             # Signaux Django (creation auto du profil)
+│   ├── models.py              # Utilisateur, Profil, Entreprise, DemandeVerification (KYC)...
+│   ├── views.py               # Vues API (sinscrire, seConnecter, soumettre_verification, ...)
+│   ├── admin.py               # Configuration admin Django (+ DemandeVerificationAdmin)
+│   ├── signals.py             # Signaux Django (création auto du profil, broadcast_verification)
 │   ├── tests.py               # Tests unitaires
 │   ├── urls.py                # Routes de Registration
+│   ├── services/              # NOUVEAU sur cette branche — logique KYC isolée des vues
+│   │   ├── __init__.py
+│   │   ├── ocr_service.py     # Extraction OCR (PaddleOCR) des pièces/certificats
+│   │   ├── face_service.py    # Appelle face_worker.py en sous-processus (venv dédié)
+│   │   ├── face_worker.py     # Script autonome DeepFace — jamais importé par Django
+│   │   ├── patente_service.py # Vérification patente via guichet.mci.ht (Playwright)
+│   │   └── contrat_service.py # Génération du contrat vendeur (PDF, reportlab)
 │   └── migrations/
 │       ├── __init__.py
-│       └── 0001_initial.py    # Migration initiale
+│       ├── 0001_initial.py               # Migration initiale
+│       ├── 0012_demandeverification.py   # NOUVEAU — modèle DemandeVerification
+│       └── 0013_alter_demandeverification_statut.py  # NOUVEAU — ajout numero_piece_saisi, etc.
 │
 ├── RekoltHt/                  # App pour la gestion des annonces/ventes
 │   ├── __init__.py
@@ -749,6 +853,15 @@ DÉMARRAGE DU PROJET
 6. ACCÈS ADMIN:
    http://localhost:8000/admin/
 
+6bis. VÉRIFICATION KYC (nouveau — optionnel, voir section 6 des fonctionnalités):
+   Nécessite Python 3.12 (paddlepaddle n'a pas de wheel 3.13+) :
+     python -m playwright install chromium
+   Pour activer la vérification faciale automatique (sinon échoue proprement
+   avec un motif clair, revue manuelle via l'admin possible) :
+     py -3.12 -m venv venv_face
+     venv_face\Scripts\pip install -r requirements-face.txt
+     (renseigner FACE_VENV_PYTHON=<chemin>\venv_face\Scripts\python.exe dans .env.dev)
+
 7. DÉPLOIEMENT EN PRODUCTION (Render):
    Renseigner SECRET_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_KEY/SECRET, EMAIL_*, DB_*
    et CLOUDINARY_URL dans le tableau de bord Render (voir .env.prod.example),
@@ -798,8 +911,12 @@ Authentification sociale: https://python-social-auth.readthedocs.io/
                             FIN DU README
 ================================================================================
 Créé pour: Projet BackendRekoltHt
-Version: 1.1
+Version: 1.2
 Date: 2026
-Mise à jour: Ajout des endpoints de gestion du profil (affichage, modification
+Mise à jour: Branche Features/become-seller — vérification KYC vendeur
+(DemandeVerification, OCR, vérification faciale via DeepFace en venv séparé,
+vérification patente via guichet.mci.ht, génération de contrat PDF, promotion
+automatique acheteur→vendeur). Voir section 6 des fonctionnalités.
+Historique: Ajout des endpoints de gestion du profil (affichage, modification
 des informations utilisateur/profil, changement de mot de passe, upload de
-photo de profil) et de l'authentification Google OAuth2.
+photo de profil) et de l'authentification Google OAuth2 (v1.1).
