@@ -1,0 +1,32 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  REQUIREMENTS — Environnement DÉDIÉ à la vérification faciale (DeepFace)
+#  NE PAS installer dans le même environnement que requirements.txt !
+#
+#  DeepFace (via TensorFlow) exige protobuf>=6.31.1, alors que paddleocr/
+#  paddlepaddle (requirements.txt, étape 03 de soumettre_verification) exige
+#  protobuf<=3.20.2 — vérifié en conditions réelles : `import paddle` échoue
+#  (TypeError: Descriptors cannot be created directly) dès que deepface est
+#  installé à côté dans le même environnement. Les deux ne peuvent PAS
+#  cohabiter dans un seul processus/venv Python.
+#
+#  Installation (environnement séparé) :
+#    python -m venv venv_face
+#    venv_face/Scripts/pip install -r requirements-face.txt   (Windows)
+#    venv_face/bin/pip install -r requirements-face.txt        (Linux/macOS)
+#  Puis renseigner FACE_VENV_PYTHON=<chemin vers venv_face>/.../python(.exe)
+#  dans .env — voir Registration/services/face_service.py, appelé via
+#  subprocess (jamais importé directement par Django).
+#
+#  IMPORTANT — préchauffer les poids AVANT la mise en production : au tout
+#  premier appel, DeepFace télécharge son modèle (facenet_weights.h5, ~90 Mo)
+#  depuis GitHub et le met en cache localement (~/.deepface/weights/) — sur une
+#  connexion lente, ce téléchargement peut dépasser TIMEOUT_SECONDES
+#  (face_service.py) et faire basculer à tort la demande en revue manuelle.
+#  Exécuter une fois, après l'installation, dans venv_face :
+#    python -c "from deepface import DeepFace; DeepFace.build_model('Facenet')"
+# ══════════════════════════════════════════════════════════════════════════════
+
+deepface==0.0.100   # reconnaissance/vérification faciale (DeepFace.verify)
+tensorflow==2.21.0  # moteur de deep learning requis par deepface/keras
+tf-keras==2.21.0    # requis par la dépendance retina-face de deepface sous Keras 3
+                    # (sinon : "ValueError: You have tensorflow ... this requires tf-keras")

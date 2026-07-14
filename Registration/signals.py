@@ -1,7 +1,7 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from Api.broadcast import broadcast
-from .models import Utilisateur, Entreprise, Profil
+from .models import Utilisateur, Entreprise, Profil, DemandeVerification
 
 
 # ── CRÉER LE PROFIL AUTOMATIQUEMENT ──────────────────────────────────────────
@@ -80,4 +80,24 @@ def broadcast_profil_supprime(sender, instance, **kwargs):
     """
     broadcast("profil.deleted", {
         "user_id": str(instance.utilisateur.id),
+    })
+
+
+# ── BROADCAST WEBSOCKET — DEMANDE DE VÉRIFICATION MISE À JOUR ────────────────
+@receiver(post_save, sender=DemandeVerification)
+def broadcast_verification(sender, instance, created, **kwargs):
+    """
+    Notifie React en temps réel à chaque changement sur une demande de
+    vérification KYC (étape 08) — en plus de l'email envoyé par
+    marquer_verifie()/marquer_echoue() (Registration/models.py). On ne
+    diffuse pas la création initiale (en_attente, rien de nouveau à afficher),
+    même logique que broadcast_profil ci-dessus.
+    """
+    if created:
+        return
+    broadcast("verification.updated", {
+        "utilisateur_id": str(instance.utilisateur_id),
+        "type_demandeur": instance.type_demandeur,
+        "statut":         instance.statut,
+        "motif_echec":    instance.motif_echec,
     })

@@ -16,8 +16,10 @@ from channels.routing import ProtocolTypeRouter, URLRouter  # routage selon le p
 from channels.auth import AuthMiddlewareStack          # middleware qui injecte l'utilisateur Django dans le scope WebSocket
 from Api.routing import websocket_urlpatterns          # liste des routes WebSocket définies dans Api/routing.py
 
-# pointer vers le fichier de configuration Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'BackendRekoltHt.settings')
+# pointer vers le module de configuration Django (dev par défaut, voir
+# BackendRekoltHt/settings/ — surchargeable via la variable d'environnement
+# DJANGO_SETTINGS_MODULE, ex: BackendRekoltHt.settings.prod sur Render)
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'BackendRekoltHt.settings.dev')
 
 # ProtocolTypeRouter dirige chaque connexion vers le bon gestionnaire selon son type
 application = ProtocolTypeRouter({
