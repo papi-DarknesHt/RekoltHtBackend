@@ -1,5 +1,6 @@
 # ── IMPORTS ───────────────────────────────────────────────────────────────────
 import base64          # décodage des images/logos envoyés en base64 depuis le frontend
+from difflib import SequenceMatcher
 import json            # lecture/écriture du corps des requêtes HTTP au format JSON
 import random          # génération du code PIN à 4 chiffres pour la réinitialisation
 import re              # normalisation des identifiants de pièce (comparaison OCR / unicité)
@@ -29,7 +30,6 @@ from .models import (
 from .services.ocr_service import (
     extraire_infos_piece,       # OCR (PaddleOCR) sur un document, étape 02
     parser_date_naissance,      # convertit la date extraite (str) en objet date
-    SEUIL_CONFIANCE_MINIMUM,    # score PaddleOCR minimum avant de juger le document illisible
 )
 
 
@@ -1135,6 +1135,39 @@ def _normaliser_identifiant(valeur):
     return re.sub(r'[^A-Z0-9]', '', sans_accents.upper())
 
 
+def _mots_normalises(valeur):
+    """Découpe une chaîne en tokens normalisés, utile quand l'OCR inverse ou fusionne les mots."""
+    if not valeur:
+        return []
+    sans_accents = ''.join(c for c in unicodedata.normalize('NFD', valeur) if unicodedata.category(c) != 'Mn')
+    return [mot for mot in re.split(r'[^A-Z0-9]+', sans_accents.upper()) if mot]
+
+
+def _champs_correspondent(attendu, extrait, *, seuil_similarite=0.85, comparer_mots=False):
+    """Compare deux champs OCRisés avec tolérance sur la casse, les accents et quelques permutations."""
+    attendu_normalise = _normaliser_identifiant(attendu)
+    extrait_normalise = _normaliser_identifiant(extrait)
+
+    if not attendu_normalise or not extrait_normalise:
+        return False
+
+    if attendu_normalise == extrait_normalise:
+        return True
+
+    if attendu_normalise in extrait_normalise or extrait_normalise in attendu_normalise:
+        return True
+
+    if comparer_mots:
+        attendu_mots = set(_mots_normalises(attendu))
+        extrait_mots = set(_mots_normalises(extrait))
+        if attendu_mots and extrait_mots:
+            communs = attendu_mots & extrait_mots
+            if communs and len(communs) / min(len(attendu_mots), len(extrait_mots)) >= 0.67:
+                return True
+
+    return SequenceMatcher(None, attendu_normalise, extrait_normalise).ratio() >= seuil_similarite
+
+
 def _coord_ou_none(valeur):
     """
     Convertit une coordonnée GPS reçue du frontend en float, ou None si absente.
@@ -1224,7 +1257,7 @@ def _lancer_pipeline_ocr(demande):
         infos = extraire_infos_piece(demande.document_recto.path, demande.type_document)
 
         champs_obligatoires = (infos['nom'], infos['prenom'], infos['numero_piece'], infos['date_naissance'])
-        if infos['confiance'] < SEUIL_CONFIANCE_MINIMUM or not all(champs_obligatoires):
+        if not all(champs_obligatoires):
             # document illisible (ou champ clé manquant) : on ne laisse pas de
             # champs vides silencieusement, voir consigne de marquer_echoue
             demande.marquer_echoue("Document illisible, merci de reprendre une photo plus nette")
@@ -1240,8 +1273,10 @@ def _lancer_pipeline_ocr(demande):
         # le nom/prénom du compte doit correspondre à la pièce fournie — sinon
         # n'importe qui pourrait soumettre le document d'identité d'un tiers
         utilisateur = demande.utilisateur
-        if (_normaliser_identifiant(infos['nom']) != _normaliser_identifiant(utilisateur.nom)
-                or _normaliser_identifiant(infos['prenom']) != _normaliser_identifiant(utilisateur.prenom)):
+        if (
+            not _champs_correspondent(utilisateur.nom, infos['nom'], comparer_mots=True)
+            or not _champs_correspondent(utilisateur.prenom, infos['prenom'], comparer_mots=True)
+        ):
             demande.marquer_echoue(
                 "Le nom et prénom de votre compte ne correspondent pas à ceux figurant sur le "
                 "document fourni. Vérifiez vos informations de compte ou le document soumis."
@@ -1249,7 +1284,7 @@ def _lancer_pipeline_ocr(demande):
             return
 
         # le numéro saisi par l'utilisateur doit être celui réellement lu sur le document
-        if _normaliser_identifiant(demande.numero_piece_saisi) != _normaliser_identifiant(infos['numero_piece']):
+        if not _champs_correspondent(demande.numero_piece_saisi, infos['numero_piece'], seuil_similarite=0.88):
             demande.marquer_echoue(
                 "Le numéro de pièce saisi ne correspond pas à celui figurant sur le document "
                 "fourni. Vérifiez le numéro saisi et réessayez."
@@ -1259,8 +1294,10 @@ def _lancer_pipeline_ocr(demande):
     else:  # entreprise
         infos = extraire_infos_piece(demande.certificat_patente.path, type_document=None)
 
-        if infos['confiance'] < SEUIL_CONFIANCE_MINIMUM:
-            demande.marquer_echoue("Document illisible, merci de reprendre une photo plus nette")
+        if not infos['numero_piece']:
+            demande.marquer_en_attente_manuelle(
+                "Le certificat de patente a été lu de façon incomplète. Une vérification manuelle est nécessaire."
+            )
             return
 
         demande.numero_patente_extrait = infos['numero_piece']
@@ -1271,7 +1308,11 @@ def _lancer_pipeline_ocr(demande):
         # uniquement si "Délivré à" a bien été lu (label moins garanti que le
         # numéro de patente lui-même, voir extraire_infos_piece)
         entreprise = Entreprise.objects.get(pk=demande.utilisateur_id)
-        if infos['nom_entreprise'] and _normaliser_identifiant(infos['nom_entreprise']) != _normaliser_identifiant(entreprise.nom_Entreprise):
+        if infos['nom_entreprise'] and not _champs_correspondent(
+            entreprise.nom_Entreprise,
+            infos['nom_entreprise'],
+            comparer_mots=True,
+        ):
             demande.marquer_echoue(
                 "Le nom de l'entreprise enregistrée sur la plateforme ne correspond pas à celui "
                 "figurant sur le certificat de patente fourni."
@@ -1283,15 +1324,13 @@ def _lancer_pipeline_ocr(demande):
         # un problème de lisibilité, pas une non-concordance
         numero_extrait_normalise = _normaliser_identifiant(infos['numero_piece'])
         if not numero_extrait_normalise:
-            demande.marquer_echoue(
-                "Le numéro de patente n'a pas pu être lu sur le certificat fourni. "
-                "Merci de reprendre une photo plus nette."
+            demande.marquer_en_attente_manuelle(
+                "Le numéro de patente n'a pas pu être confirmé automatiquement. Une vérification manuelle est nécessaire."
             )
             return
-        if _normaliser_identifiant(demande.numero_piece_saisi) != numero_extrait_normalise:
-            demande.marquer_echoue(
-                "Le numéro de patente saisi ne correspond pas à celui figurant sur le "
-                "certificat fourni. Vérifiez le numéro saisi et réessayez."
+        if not _champs_correspondent(demande.numero_piece_saisi, numero_extrait_normalise, seuil_similarite=0.88):
+            demande.marquer_en_attente_manuelle(
+                "Le numéro de patente saisi ne correspond pas exactement à celui lu automatiquement. Une vérification manuelle est nécessaire."
             )
             return
 
@@ -1368,9 +1407,11 @@ def _verifier_patente_mci(demande):
     try:
         resultat = verifier_patente(entreprise.nom_Entreprise, numero_attendu=numero_attendu)
     except PatenteIndisponible as e:
-        # aucune revue manuelle : le pipeline doit toujours conclure vérifié/échoué
+        # le site externe peut devenir indisponible : on bascule alors en revue manuelle
         print("guichet.mci.ht indisponible :", str(e))
-        demande.marquer_echoue(f"La vérification du registre du Ministère du Commerce et de l'Industrie n'a pas pu être effectuée ({e}). Merci de réessayer plus tard.")
+        demande.marquer_en_attente_manuelle(
+            f"La vérification du registre du Ministère du Commerce et de l'Industrie n'a pas pu être effectuée ({e}). Une revue manuelle est nécessaire."
+        )
         return
 
     demande.donnees_ocr_brutes = {**(demande.donnees_ocr_brutes or {}), 'verification_mci': resultat}
@@ -1382,11 +1423,12 @@ def _verifier_patente_mci(demande):
     else:
         # nom trouvé mais numéro absent/non concordant : le format de
         # numero_patente_extrait n'est pas garanti (voir _lancer_pipeline_ocr),
-        # mais le pipeline doit tout de même conclure — pas de revue manuelle
-        demande.marquer_echoue(
+        # donc on laisse une revue manuelle plutôt que de rejeter à tort une
+        # entreprise légitime.
+        demande.marquer_en_attente_manuelle(
             "Le nom de l'entreprise a été trouvé sur le registre du Ministère du Commerce "
-            "et de l'Industrie, mais le numéro de patente n'a pas pu être confirmé. "
-            "Vérifiez le numéro sur votre certificat et soumettez à nouveau."
+            "et de l'Industrie, mais le numéro de patente n'a pas pu être confirmé automatiquement. "
+            "Une vérification manuelle est nécessaire."
         )
 
 

@@ -405,6 +405,10 @@ class DemandeVerification(models.Model):
         self.contrat_pdf.save(nom_fichier, ContentFile(pdf_bytes), save=False)
         self.save()
 
+        if not self.utilisateur.email:
+            print(f"Notification email ignorée (demande {self.id}) : adresse utilisateur manquante")
+            return
+
         nom_complet = f"{self.utilisateur.prenom} {self.utilisateur.nom}".strip()
         email = EmailMessage(
             subject    = "Votre vérification RekoltHt est validée",
@@ -427,6 +431,38 @@ class DemandeVerification(models.Model):
         except Exception as e:
             print(f"ERREUR envoi email de validation (demande {self.id}) :", e)
 
+    def marquer_en_attente_manuelle(self, motif):
+        """Place la demande dans un état intermédiaire pour relecture admin."""
+        self.statut = 'en_attente_manuelle'
+        self.motif_echec = motif
+        self.date_traitement = timezone.now()
+        self.save()
+
+        if not self.utilisateur.email:
+            print(f"Notification email ignorée (demande {self.id}) : adresse utilisateur manquante")
+            return
+
+        from django.conf import settings
+        from django.core.mail import send_mail
+
+        nom_complet = f"{self.utilisateur.prenom} {self.utilisateur.nom}".strip()
+        try:
+            send_mail(
+                subject        = "Votre vérification RekoltHt nécessite une revue manuelle",
+                message        = (
+                    f"Bonjour {nom_complet},\n\n"
+                    "Votre demande de vérification a bien été reçue, mais elle nécessite une revue manuelle.\n\n"
+                    f"Motif : {motif}\n\n"
+                    "Vous serez notifié dès qu'un administrateur aura finalisé le traitement.\n\n"
+                    "L'équipe RekoltHt"
+                ),
+                from_email     = settings.DEFAULT_FROM_EMAIL,
+                recipient_list = [self.utilisateur.email],
+                fail_silently  = False,
+            )
+        except Exception as e:
+            print(f"ERREUR envoi email de revue manuelle (demande {self.id}) :", e)
+
     def marquer_echoue(self, motif):
         """
         Marque la demande comme échouée avec le motif fourni, horodate le
@@ -439,6 +475,10 @@ class DemandeVerification(models.Model):
 
         from django.conf import settings   # import différé, voir marquer_verifie
         from django.core.mail import send_mail
+
+        if not self.utilisateur.email:
+            print(f"Notification email ignorée (demande {self.id}) : adresse utilisateur manquante")
+            return
 
         nom_complet = f"{self.utilisateur.prenom} {self.utilisateur.nom}".strip()
         # le statut est déjà enregistré (self.save() ci-dessus) : voir

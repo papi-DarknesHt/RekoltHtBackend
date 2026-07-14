@@ -32,8 +32,8 @@ _RE_NUMERO = re.compile(r'\b([A-Z0-9][A-Z0-9\-]{4,18}[A-Z0-9])\b')
 _LABELS_NOM    = {'NOM', 'SIYATI'}
 _LABELS_PRENOM = {'PRENOM', 'NON'}
 _LABELS_NUMERO_PAR_TYPE = {
-    'passeport': {'PASSEPORT'},                    # "Paspò nimewo / N° Passeport"
-    'cin':       {'CARTE', 'KAT'},                  # "Numéro de carte / Nimewo kat la"
+    'passeport': {'PASSEPORT', 'PASPO'},            # "Paspò nimewo / N° Passeport" (variantes OCR FR/Kreyòl)
+    'cin':       {'CARTE', 'KAT', 'CIN'},           # "Numéro de carte / Nimewo kat la"
     'permis':    {'NIF'},                           # identifiant retenu pour le permis (voir consigne produit)
 }
 _LABELS_NUMERO_PATENTE = {'PATENTE'}                # "Numéro de Patente"
@@ -113,9 +113,18 @@ def _valeur_dans_meme_boite(texte, labels):
         # chiffre, cas réel d'une valeur fusionnée ("Patente590712200")
         if fin < len(normalise) and normalise[fin].isalpha():
             continue
+        # collé sans espace au libellé (valeur vraiment fusionnée, ex.
+        # "Patente590712200") — sinon, un espace suivi de simples mots du
+        # même libellé (ex. "Nimewo kat la", "la" étant l'article créole, pas
+        # une valeur) ne doit être accepté que s'il ressemble à une vraie
+        # valeur (au moins un chiffre) — constaté en conditions réelles
+        colle = fin >= len(normalise) or normalise[fin] not in ' \t'
         reste = texte[fin:].strip(" :./-")
-        if reste:
-            return reste
+        if not reste:
+            continue
+        if not colle and not any(c.isdigit() for c in reste):
+            continue
+        return reste
     return None
 
 
@@ -137,6 +146,14 @@ def _chercher_valeur_liee(detections, labels):
     un certificat de patente.
     """
     candidats = [d for d in detections if _label_present(d['texte'], labels)]
+
+    # cas particulier : "NOM" est une sous-chaîne de "PRENOM" (ex: "Prenom/Non"
+    # matcherait à tort la recherche du NOM de famille et gagnerait la boîte
+    # correspondant en fait au prénom, avant la vraie boîte "Nom/Siyati" —
+    # constaté en conditions réelles) — une boîte qui porte aussi le libellé
+    # PRENOM n'est jamais une boîte NOM légitime sur les pièces observées.
+    if labels is _LABELS_NOM:
+        candidats = [d for d in candidats if not _label_present(d['texte'], _LABELS_PRENOM)]
 
     for detection in candidats:
         meme_boite = _valeur_dans_meme_boite(detection['texte'], labels)
@@ -174,11 +191,22 @@ def _chercher_date_naissance(lignes):
 
 
 def _nettoyer_numero(valeur):
-    """Extrait le motif ressemblant à un numéro de pièce dans une valeur OCRisée brute."""
+    """
+    Extrait le motif ressemblant à un numéro de pièce dans une valeur OCRisée
+    brute. Préfère un motif contenant au moins un chiffre — un vrai numéro en
+    a toujours un, alors qu'un fragment de libellé purement alphabétique
+    laissé dans la valeur (ex: "NUMERO" avant le vrai numéro dans "Numero de
+    Patentc:8707001535", le libellé "Patente" ayant lui-même été mal lu par
+    l'OCR) matcherait sinon en premier et masquerait le vrai numéro plus loin
+    dans la même chaîne — constaté en conditions réelles.
+    """
     if not valeur:
         return None
-    trouve = _RE_NUMERO.search(valeur.upper())
-    return trouve.group(1) if trouve else valeur.strip() or None
+    candidats = _RE_NUMERO.findall(valeur.upper())
+    avec_chiffre = [c for c in candidats if any(ch.isdigit() for ch in c)]
+    if avec_chiffre:
+        return avec_chiffre[0]
+    return candidats[0] if candidats else valeur.strip() or None
 
 
 def extraire_infos_piece(chemin_image, type_document):
