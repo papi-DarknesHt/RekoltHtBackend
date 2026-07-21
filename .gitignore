@@ -24,3 +24,5 @@ htmlcov/
 .claude/
 *.pyc
 *.sqlite3
+*.pyc
+*.pyc

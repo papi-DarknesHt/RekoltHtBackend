@@ -2,6 +2,9 @@
                     PROJET BACKEND REKOLTHT
 ================================================================================
 
+Pour l'installation et le lancement pas-à-pas, voir README.md — ce fichier
+est la référence technique détaillée (modèles, endpoints, architecture).
+
 DESCRIPTION DU PROJET
 ================================================================================
 BackendRekoltHt est un backend Django qui gère une plateforme de mise en relation 
@@ -830,39 +833,27 @@ Note: Configuration d'authentification partiellement commentée dans asgi.py
 DÉMARRAGE DU PROJET
 ================================================================================
 
-1. INSTALLATION:
-   pip install -r requirements.txt
+L'installation (uv/pip, environnement virtuel, venv_face pour la
+vérification faciale) et le lancement pas-à-pas sont documentés dans
+README.md, pour éviter de dupliquer les mêmes instructions à deux endroits
+qui risqueraient de diverger avec le temps.
 
-2. VARIABLES D'ENVIRONNEMENT (développement):
-   Copier .env.dev.example vers .env.dev et renseigner les valeurs réelles
-   (SECRET_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET, ...)
-   cp .env.dev.example .env.dev
+Complément utile, non couvert par README.md — PROBLÈMES FRÉQUENTS sur la
+vérification KYC (voir section 6 des fonctionnalités) :
+   - "WinError 5: Access is denied" au lancement du sous-processus DeepFace
+     → FACE_VENV_PYTHON pointe vers le dossier venv_face au lieu de
+     venv_face\Scripts\python.exe ; redémarrer le serveur après correction.
+   - "TypeError: Descriptors cannot be created directly" / import paddle
+     échoue dans .venv → deepface/tensorflow ont été installés par erreur
+     dans .venv au lieu de venv_face (conflit protobuf) ; recréer .venv.
+   - Vérification faciale qui échoue systématiquement en timeout → modèle
+     ArcFace non préchargé sur une connexion lente, ou TIMEOUT_SECONDES
+     (face_service.py) trop court pour la machine cible.
+   - "playwright._impl._errors.Error: Executable doesn't exist" lors de la
+     vérification patente entreprise → l'étape "playwright install chromium"
+     n'a pas été exécutée dans .venv (voir README.md).
 
-3. MIGRATIONS:
-   python manage.py migrate
-   (utilise BackendRekoltHt.settings.dev par défaut, voir manage.py)
-
-4. CRÉER UN SUPER-UTILISATEUR (optionnel):
-   python manage.py createsuperuser
-
-5. SERVEUR DÉVELOPPEMENT:
-   avec support WebSocket (asynchrone):
-   uvicorn BackendRekoltHt.asgi:application --port 8000 --reload
-   Serveur ASGI: http://localhost:8000/
-
-6. ACCÈS ADMIN:
-   http://localhost:8000/admin/
-
-6bis. VÉRIFICATION KYC (nouveau — optionnel, voir section 6 des fonctionnalités):
-   Nécessite Python 3.12 (paddlepaddle n'a pas de wheel 3.13+) :
-     python -m playwright install chromium
-   Pour activer la vérification faciale automatique (sinon échoue proprement
-   avec un motif clair, revue manuelle via l'admin possible) :
-     py -3.12 -m venv venv_face
-     venv_face\Scripts\pip install -r requirements-face.txt
-     (renseigner FACE_VENV_PYTHON=<chemin>\venv_face\Scripts\python.exe dans .env.dev)
-
-7. DÉPLOIEMENT EN PRODUCTION (Render):
+DÉPLOIEMENT EN PRODUCTION (Render) :
    Renseigner SECRET_KEY, SOCIAL_AUTH_GOOGLE_OAUTH2_KEY/SECRET, EMAIL_*, DB_*
    et CLOUDINARY_URL dans le tableau de bord Render (voir .env.prod.example),
    puis définir DJANGO_SETTINGS_MODULE=BackendRekoltHt.settings.prod.

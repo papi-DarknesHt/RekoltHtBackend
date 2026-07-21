@@ -23,6 +23,18 @@ _RE_DATE   = re.compile(r'(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})')
 # pas seulement des caractères alphanumériques contigus
 _RE_NUMERO = re.compile(r'\b([A-Z0-9][A-Z0-9\-]{4,18}[A-Z0-9])\b')
 
+# les passeports haïtiens affichent les dates en jour + nom(s) de mois abrégé
+# bilingue créole/français + année sur 2 chiffres, souvent collés sans espace
+# par l'OCR (ex: "01Me/Mai02" pour le 01/05/2002, "03Jan/Jan24" pour le
+# 03/01/2024) — constaté en conditions réelles, voir _chercher_date_naissance
+_RE_DATE_MOIS_LETTRES = re.compile(r'(\d{1,2})\s*([A-Za-zÀ-ÿ]{2,10}(?:/[A-Za-zÀ-ÿ]{2,10})?)\s*(\d{2})\b')
+_MOIS_ABREGES = {
+    'JAN': 1, 'FEV': 2, 'FÉV': 2, 'MAS': 3, 'MAR': 3, 'AVR': 4,
+    'ME': 5, 'MAI': 5, 'JEN': 6, 'JUN': 6, 'JIY': 7, 'JUL': 7,
+    'OUT': 8, 'AOU': 8, 'SEP': 9, 'OKT': 10, 'OCT': 10,
+    'NOV': 11, 'DES': 12, 'DEC': 12, 'DÉC': 12,
+}
+
 # labels par type de document — voir _chercher_valeur_liee : la mise en page
 # réelle des pièces haïtiennes (constatée sur des documents réels) place la
 # VALEUR sous l'étiquette (ou parfois à sa droite), jamais collée dessus, et
@@ -31,6 +43,13 @@ _RE_NUMERO = re.compile(r'\b([A-Z0-9][A-Z0-9\-]{4,18}[A-Z0-9])\b')
 # simple ordre séquentiel du texte.
 _LABELS_NOM    = {'NOM', 'SIYATI'}
 _LABELS_PRENOM = {'PRENOM', 'NON'}
+# "SIYATI" (créole) désigne à la fois le libellé du nom ("Siyati/Nom") ET la
+# ligne de signature plus bas sur le passeport ("Siyati [...] a / Signature du
+# titulaire") — sans cette exclusion, la ligne de signature est retenue comme
+# valeur du nom, car elle a du texte fusionné dans la même boîte qui gagne la
+# recherche avant même d'essayer la vraie boîte "Siyati/Nom" (priorité 1 de
+# _chercher_valeur_liee) — constaté en conditions réelles
+_LABELS_EXCLUS_NOM = {'SIGNATURE', 'TITULAIRE'}
 _LABELS_NUMERO_PAR_TYPE = {
     'passeport': {'PASSEPORT'},                    # "Paspò nimewo / N° Passeport"
     'cin':       {'CARTE', 'KAT'},                  # "Numéro de carte / Nimewo kat la"
@@ -119,13 +138,41 @@ def _valeur_dans_meme_boite(texte, labels):
     return None
 
 
-def _chercher_valeur_liee(detections, labels):
+def _ressemble_a_un_numero(texte):
+    """
+    Vrai si le texte contient un motif plausible de numéro de pièce (voir
+    _RE_NUMERO) ET au moins un chiffre — sert à départager plusieurs boîtes
+    voisines candidates de la recherche par position (priorité 2 de
+    _chercher_valeur_liee). Exemple réel : sur un passeport, la ligne sous
+    "N°Passeport" est découpée en trois colonnes proches ("P", "HTI",
+    "R12009379") ; sans ce filtre, la boîte la plus proche géométriquement
+    ("P", le code type de document) gagne à tort au lieu de la vraie colonne
+    du numéro. Le chiffre est obligatoire car _RE_NUMERO seul accepte aussi
+    une suite de lettres majuscules (ex: "NAPOLEON", 8 caractères) — sans
+    cette exigence, un nom voisin peut être pris à tort pour le numéro de
+    pièce (constaté en conditions réelles).
+    """
+    return bool(_RE_NUMERO.search(texte.upper())) and any(c.isdigit() for c in texte)
+
+
+def _chercher_valeur_liee(detections, labels, exclure=None, filtre=None):
     """
     Cherche une détection dont le texte contient un des tokens de `labels`,
     puis retourne la valeur associée — la valeur associée est presque
     toujours juste en dessous (mise en page en tableau) ou juste à droite
     (mise en page en ligne) de son étiquette, ou parfois fusionnée dans la
     même boîte (voir _valeur_dans_meme_boite).
+
+    `exclure` : labels supplémentaires qui, s'ils apparaissent dans la même
+    boîte qu'un des `labels` recherchés, disqualifient cette boîte (ex: une
+    boîte "SIYATI" qui est en réalité la ligne de signature, pas le nom —
+    voir _LABELS_EXCLUS_NOM).
+
+    `filtre` : si fourni, la recherche par position (priorité 2) préfère,
+    parmi les boîtes voisines candidates, la première qui satisfait ce
+    prédicat plutôt que la plus proche géométriquement (voir
+    _ressemble_a_un_numero) ; si aucune ne le satisfait, on retombe sur la
+    plus proche comme avant.
 
     Priorité 1 sur TOUTES les boîtes portant le libellé (pas seulement la
     première) : si l'une contient la valeur fusionnée dans le même texte, on
@@ -136,7 +183,11 @@ def _chercher_valeur_liee(detections, labels):
     renverrait une valeur sans rapport — constaté en conditions réelles sur
     un certificat de patente.
     """
-    candidats = [d for d in detections if _label_present(d['texte'], labels)]
+    candidats = [
+        d for d in detections
+        if _label_present(d['texte'], labels)
+        and not (exclure and _label_present(d['texte'], exclure))
+    ]
 
     for detection in candidats:
         meme_boite = _valeur_dans_meme_boite(detection['texte'], labels)
@@ -147,7 +198,7 @@ def _chercher_valeur_liee(detections, labels):
     # libellé trouvé (mise en page en tableau/ligne)
     for detection in candidats:
         lx, ly = detection['cx'], detection['cy']
-        meilleur, meilleure_distance = None, None
+        proches = []
         for autre in detections:
             if autre is detection or _est_un_label(autre['texte']):
                 continue
@@ -157,19 +208,62 @@ def _chercher_valeur_liee(detections, labels):
             if dy < -10 or (abs(dy) < 15 and dx < -10):
                 continue
             distance = (dy if dy > 15 else abs(dy) * 0.3) + abs(dx) * 0.15
-            if meilleure_distance is None or distance < meilleure_distance:
-                meilleur, meilleure_distance = autre['texte'], distance
-        if meilleur:
-            return meilleur.strip(" :.-")
+            proches.append((distance, autre['texte']))
+        if not proches:
+            continue
+        proches.sort(key=lambda p: p[0])
+        if filtre:
+            correspond = next((texte for _, texte in proches if filtre(texte)), None)
+            if correspond:
+                return correspond.strip(" :.-")
+        return proches[0][1].strip(" :.-")
     return None
 
 
+def _mois_depuis_texte(texte):
+    """Fait correspondre un nom de mois abrégé (créole et/ou français, ex:
+    'Me/Mai') à son numéro, via _MOIS_ABREGES — None si aucun ne correspond."""
+    normalise = _sans_accents(texte).upper()
+    for partie in re.split(r'[/\s]+', normalise):
+        for abrege, numero in _MOIS_ABREGES.items():
+            if partie.startswith(abrege):
+                return numero
+    return None
+
+
+def _annee_sur_quatre_chiffres(annee_deux_chiffres):
+    """Convertit une année sur 2 chiffres en 4 chiffres. Pivot à 30 : une
+    pièce d'identité affiche aussi bien une date de naissance ancienne
+    (19xx) qu'une date d'émission/expiration récente (20xx) — 30 couvre les
+    naissances jusqu'en 2030 en 20xx, au-delà on suppose 19xx."""
+    annee = int(annee_deux_chiffres)
+    return 2000 + annee if annee <= 30 else 1900 + annee
+
+
 def _chercher_date_naissance(lignes):
-    """Retourne la première date au format JJ/MM/AAAA (ou -/.) trouvée dans le texte."""
+    """
+    Retourne la première date trouvée, au format JJ/MM/AAAA.
+
+    Essaie d'abord le format numérique standard (JJ/MM/AAAA, voir _RE_DATE),
+    puis, si aucune ligne ne correspond, le format bilingue créole/français
+    des passeports haïtiens : jour + nom(s) de mois abrégé(s) + année sur 2
+    chiffres, souvent collés sans espace par l'OCR (ex: "01Me/Mai02" pour le
+    01/05/2002 — voir _RE_DATE_MOIS_LETTRES et _MOIS_ABREGES). Plusieurs
+    correspondances peuvent apparaître sur une même ligne (faux positifs,
+    ex. un fragment du numéro de passeport lu comme "94HTI02") : on ignore
+    silencieusement celles dont le texte ne correspond à aucun mois connu et
+    on essaie la suivante, plutôt que d'abandonner la ligne entière.
+    """
     for ligne in lignes:
         trouve = _RE_DATE.search(ligne)
         if trouve:
             return trouve.group(0)
+    for ligne in lignes:
+        for trouve in _RE_DATE_MOIS_LETTRES.finditer(ligne):
+            jour, mois_texte, annee_deux_chiffres = trouve.groups()
+            mois = _mois_depuis_texte(mois_texte)
+            if mois:
+                return f"{int(jour):02d}/{mois:02d}/{_annee_sur_quatre_chiffres(annee_deux_chiffres)}"
     return None
 
 
@@ -215,14 +309,14 @@ def extraire_infos_piece(chemin_image, type_document):
     lignes = [d['texte'] for d in detections]
 
     labels_numero = _LABELS_NUMERO_PAR_TYPE.get(type_document, _LABELS_NUMERO_PATENTE)
-    numero_brut   = _chercher_valeur_liee(detections, labels_numero)
+    numero_brut   = _chercher_valeur_liee(detections, labels_numero, filtre=_ressemble_a_un_numero)
 
     nom_entreprise = None
     if type_document is None:   # mode générique (patente) uniquement
         nom_entreprise = _chercher_valeur_liee(detections, _LABELS_ENTREPRISE)
 
     return {
-        'nom':            _chercher_valeur_liee(detections, _LABELS_NOM),
+        'nom':            _chercher_valeur_liee(detections, _LABELS_NOM, exclure=_LABELS_EXCLUS_NOM),
         'prenom':         _chercher_valeur_liee(detections, _LABELS_PRENOM),
         'numero_piece':   _nettoyer_numero(numero_brut),
         'nom_entreprise': nom_entreprise,

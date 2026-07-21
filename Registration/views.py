@@ -1222,8 +1222,17 @@ def _lancer_pipeline_ocr(demande):
     """
     if demande.type_demandeur == 'individuel':
         infos = extraire_infos_piece(demande.document_recto.path, demande.type_document)
+        print("── OCR pièce d'identité (individuel) ──")
+        for cle, valeur in infos.items():
+            print(f"  {cle} : {valeur}")
 
-        champs_obligatoires = (infos['nom'], infos['prenom'], infos['numero_piece'], infos['date_naissance'])
+        # permis de conduire : seul le NIF est vérifié (décision produit) —
+        # nom/prénom/date de naissance ne sont ni exigés ni cross-vérifiés,
+        # contrairement au passeport et à la CIN
+        if demande.type_document == 'permis':
+            champs_obligatoires = (infos['numero_piece'],)
+        else:
+            champs_obligatoires = (infos['nom'], infos['prenom'], infos['numero_piece'], infos['date_naissance'])
         if infos['confiance'] < SEUIL_CONFIANCE_MINIMUM or not all(champs_obligatoires):
             # document illisible (ou champ clé manquant) : on ne laisse pas de
             # champs vides silencieusement, voir consigne de marquer_echoue
@@ -1238,9 +1247,12 @@ def _lancer_pipeline_ocr(demande):
         demande.save()
 
         # le nom/prénom du compte doit correspondre à la pièce fournie — sinon
-        # n'importe qui pourrait soumettre le document d'identité d'un tiers
+        # n'importe qui pourrait soumettre le document d'identité d'un tiers.
+        # Exception permis : seul le NIF est vérifié (voir plus haut), la
+        # correspondance d'identité reste couverte par la vérification faciale
         utilisateur = demande.utilisateur
-        if (_normaliser_identifiant(infos['nom']) != _normaliser_identifiant(utilisateur.nom)
+        if demande.type_document != 'permis' and (
+                _normaliser_identifiant(infos['nom']) != _normaliser_identifiant(utilisateur.nom)
                 or _normaliser_identifiant(infos['prenom']) != _normaliser_identifiant(utilisateur.prenom)):
             demande.marquer_echoue(
                 "Le nom et prénom de votre compte ne correspondent pas à ceux figurant sur le "
@@ -1258,6 +1270,9 @@ def _lancer_pipeline_ocr(demande):
 
     else:  # entreprise
         infos = extraire_infos_piece(demande.certificat_patente.path, type_document=None)
+        print("── OCR certificat de patente (entreprise) ──")
+        for cle, valeur in infos.items():
+            print(f"  {cle} : {valeur}")
 
         if infos['confiance'] < SEUIL_CONFIANCE_MINIMUM:
             demande.marquer_echoue("Document illisible, merci de reprendre une photo plus nette")
@@ -1307,7 +1322,7 @@ def _lancer_verification_faciale(demande):
     passe par _verifier_patente_mci puis, en repli, une revue manuelle admin
     (lister_demandes_admin).
     """
-    from .services.face_service import comparer_visages, SEUIL_CONFIANCE_VISAGE, VerificationFacialeIndisponible
+    from .services.face_service import comparer_visages, VerificationFacialeIndisponible
 
     try:
         resultat = comparer_visages(demande.selfie.path, demande.document_recto.path)
@@ -1320,7 +1335,10 @@ def _lancer_verification_faciale(demande):
     demande.score_correspondance_visage = resultat['score_confiance']
     demande.save()
 
-    if not resultat['correspond'] or resultat['score_confiance'] < SEUIL_CONFIANCE_VISAGE:
+    # decision basee sur le "verified" natif de DeepFace (seuil calibre par
+    # modele, voir face_service.py) — score_confiance est stocke pour
+    # audit/debogage mais ne conditionne plus le resultat (voir face_service.py)
+    if not resultat['correspond']:
         # resultat['erreur'] est renseigné quand DeepFace n'a détecté aucun
         # visage dans une des deux images (face_worker.py) — un motif bien
         # plus actionnable pour l'utilisateur que le générique "ne correspond
