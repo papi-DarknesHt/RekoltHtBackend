@@ -26,7 +26,14 @@ def main():
         resultat = DeepFace.verify(
             img1_path=chemin_selfie,
             img2_path=chemin_document,
-            model_name="Facenet",
+            # Facenet confondait authentique et usurpation sur des paires
+            # selfie/permis reelles (la photo de piece, une fois recadree sur
+            # le visage, ne fait que ~70-140px de large - vignette imprimee
+            # photographiee au telephone) : la distance d'une paire authentique
+            # depassait parfois celle d'une paire usurpee. ArcFace separe
+            # correctement les deux sur le meme echantillon - verifie en
+            # conditions reelles avant ce changement.
+            model_name="ArcFace",
             # le detector par defaut ("opencv") est trop faible et rate des
             # visages pourtant nets/bien eclaires (constate en conditions
             # reelles) ; "retinaface" est nettement plus fiable, verifie sur

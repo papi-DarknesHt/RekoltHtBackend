@@ -18,12 +18,18 @@
 #  subprocess (jamais importé directement par Django).
 #
 #  IMPORTANT — préchauffer les poids AVANT la mise en production : au tout
-#  premier appel, DeepFace télécharge son modèle (facenet_weights.h5, ~90 Mo)
+#  premier appel, DeepFace télécharge son modèle (arcface_weights.h5, ~137 Mo)
 #  depuis GitHub et le met en cache localement (~/.deepface/weights/) — sur une
 #  connexion lente, ce téléchargement peut dépasser TIMEOUT_SECONDES
-#  (face_service.py) et faire basculer à tort la demande en revue manuelle.
-#  Exécuter une fois, après l'installation, dans venv_face :
-#    python -c "from deepface import DeepFace; DeepFace.build_model('Facenet')"
+#  (face_service.py) et faire échouer à tort la demande. Exécuter une fois,
+#  après l'installation, dans venv_face :
+#    python -c "from deepface import DeepFace; DeepFace.build_model('ArcFace')"
+#
+#  Modèle ArcFace choisi (pas Facenet) après test en conditions réelles :
+#  Facenet confondait paires authentiques et usurpées sur des photos de pièce
+#  d'identité haïtienne (vignette imprimée, ~70-140px une fois recadrée sur le
+#  visage) — ArcFace sépare correctement les deux sur le même échantillon.
+#  Voir Registration/services/face_worker.py.
 # ══════════════════════════════════════════════════════════════════════════════
 
 deepface==0.0.100   # reconnaissance/vérification faciale (DeepFace.verify)
