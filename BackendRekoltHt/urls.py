@@ -23,6 +23,11 @@ urlpatterns = [
     # Ex: /auth/login/google-oauth2/ → redirige vers la page de connexion Google
     path('auth/', include('social_django.urls', namespace='social')),
 
+    # ── PRODUITS ───────────────────────────────────────────────────────────────
+    # Routes définies dans Produits/urls.py
+    # Ex: /produits/lister/, /produits/creer/, /produits/categories/…
+    path('produits/', include('Produits.urls')),
+
 ]
 
 # ── FICHIERS MÉDIAS EN DÉVELOPPEMENT ──────────────────────────────────────────

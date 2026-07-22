@@ -315,9 +315,20 @@ def extraire_infos_piece(chemin_image, type_document):
     if type_document is None:   # mode générique (patente) uniquement
         nom_entreprise = _chercher_valeur_liee(detections, _LABELS_ENTREPRISE)
 
+    nom    = _chercher_valeur_liee(detections, _LABELS_NOM, exclure=_LABELS_EXCLUS_NOM)
+    prenom = _chercher_valeur_liee(detections, _LABELS_PRENOM)
+
+    # le permis n'a pas de champ PRENOM distinct : nom et prénom sont fusionnés
+    # dans la boîte NOM, séparés par un point (ex: "Napoleon.Wagnerson" : nom
+    # avant le point, prénom après) — voir consigne produit
+    if type_document == 'permis' and nom and '.' in nom:
+        nom_part, _, prenom_part = nom.partition('.')
+        nom    = nom_part.strip() or nom
+        prenom = prenom_part.strip() or prenom
+
     return {
-        'nom':            _chercher_valeur_liee(detections, _LABELS_NOM, exclure=_LABELS_EXCLUS_NOM),
-        'prenom':         _chercher_valeur_liee(detections, _LABELS_PRENOM),
+        'nom':            nom,
+        'prenom':         prenom,
         'numero_piece':   _nettoyer_numero(numero_brut),
         'nom_entreprise': nom_entreprise,
         'date_naissance': _chercher_date_naissance(lignes),
