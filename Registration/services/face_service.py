@@ -26,16 +26,12 @@ from pathlib import Path
 
 from django.conf import settings
 
-# la décision passe/échoue s'appuie sur le "verified" natif de DeepFace
-# (resultat['correspond'], voir face_worker.py) plutôt que sur un seuil
-# maison appliqué à score_confiance : ce dernier est une distance normalisée
-# 1-distance/threshold, dont l'échelle dépend du modèle utilisé (le threshold
-# interne de Facenet est 0.4, celui d'ArcFace 0.68) — un seuil maison fixe
-# calibré pour un modèle ne se transpose pas à un autre. Le threshold interne
-# de DeepFace, lui, est calibré par ses auteurs sur des benchmarks standards
-# (LFW et similaires) pour chaque modèle. score_confiance reste stocké sur la
-# demande (DemandeVerification.score_correspondance_visage) à des fins
-# d'audit/débogage, sans conditionner le résultat.
+# la décision passe/échoue s'appuie sur un seuil maison de 35% appliqué à
+# score_confiance (resultat['correspond'], voir face_worker.py) plutôt que sur
+# le "verified" natif de DeepFace, jugé trop strict en conditions réelles sur
+# des paires selfie/pièce d'identité (photo de pièce recadrée, souvent basse
+# résolution). score_confiance est aussi stocké sur la demande
+# (DemandeVerification.score_correspondance_visage) à des fins d'audit/débogage.
 
 # "retinaface" (voir face_worker.py) est un détecteur à base de réseau de
 # neurones, nettement plus lent qu'"opencv" à froid dans un sous-processus

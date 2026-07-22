@@ -60,6 +60,20 @@ class Utilisateur(models.Model):
         """Retourne True si ce compte gère au moins une entreprise enregistrée."""
         return self.entreprises.exists()   # 'entreprises' = related_name du ForeignKey proprietaire de Entreprise
 
+    def bloquer(self):
+        """Suspend le compte (accès admin, voir Registration/views.py::toggleBloquerUtilisateur)
+        et invalide immédiatement toute session active en supprimant ses tokens —
+        sinon un utilisateur déjà connecté garderait l'accès jusqu'à expiration
+        naturelle du token (pas de TTL ici, donc indéfiniment)."""
+        self.est_bloquer = True
+        self.save()
+        self.tokens.all().delete()
+
+    def debloquer(self):
+        """Réactive un compte suspendu (accès admin)."""
+        self.est_bloquer = False
+        self.save()
+
 
 # ── MODÈLE VENDEUR ────────────────────────────────────────────────────────────
 class Vendeur(Utilisateur):
@@ -126,6 +140,18 @@ class Profil(models.Model):
                      default    = 'acheteur'
                    )
 
+    # catégories de produits que le vendeur souhaite publier — choix obligatoire
+    # après validation de la vérification KYC (voir DemandeVerification.marquer_verifie
+    # et Produits/views/produitsViews.py:creerProduit, qui bloque la création de
+    # produit tant qu'aucune catégorie n'a été choisie). Référence par chaîne
+    # ('Produits.Categories') pour éviter un import circulaire — Produits importe
+    # déjà Registration.models.Utilisateur.
+    categories_produits = models.ManyToManyField(
+                             'Produits.Categories',
+                             blank        = True,
+                             related_name = 'vendeurs'
+                           )
+
     class Meta:
         db_table            = 'profil'
         verbose_name        = 'Profil'
@@ -150,6 +176,11 @@ class Profil(models.Model):
         """Repasse le rôle de 'vendeur' à 'acheteur'."""
         self.role = 'acheteur'
         self.save()
+
+    def a_choisi_categories(self):
+        """Vrai si le vendeur a déjà choisi au moins une catégorie de produit
+        (étape obligatoire après validation KYC, voir Produits/views/produitsViews.py:creerProduit)."""
+        return self.categories_produits.exists()
 
     def obtenir_utilisateur_type(self):
         """

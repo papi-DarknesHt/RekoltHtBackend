@@ -50,8 +50,16 @@ def main():
     seuil     = resultat['threshold']
     confiance = max(0.0, 1 - (distance / seuil)) if seuil else 0.0
 
+    # seuil metier assoupli a 35% de confiance (score normalise, independant
+    # du modele) plutot que le "verified" natif de DeepFace, trop strict en
+    # conditions reelles sur des paires selfie/piece d'identite (photo de
+    # piece souvent degradee : reflet, faible resolution, angle) — compense
+    # par le cross-check nom/prenom desormais actif meme pour le permis (voir
+    # _lancer_pipeline_ocr, Registration/views.py)
+    SEUIL_CONFIANCE_VISAGE = 0.35
+
     print(json.dumps({
-        'correspond':      bool(resultat['verified']),
+        'correspond':      confiance >= SEUIL_CONFIANCE_VISAGE,
         'score_confiance': round(confiance, 4),
         'erreur':          None,
     }))

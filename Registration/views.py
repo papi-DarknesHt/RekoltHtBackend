@@ -72,6 +72,11 @@ def google_connection(request):
                 'error': 'Kont sa a pa egziste. Tanpri enskri dabò.'
             }, status=404)
 
+        # compte suspendu par un admin — même contrôle que seConnecter, sinon le
+        # blocage serait contournable via la connexion Google
+        if utilisateur.est_bloquer:
+            return JsonResponse({'error': "Ce compte a été bloqué par un administrateur"}, status=403)
+
         # marquer l'utilisateur comme en ligne (est_actif = indicateur de présence)
         if not utilisateur.est_actif:
             utilisateur.modifier_est_actif()
@@ -254,6 +259,11 @@ def seConnecter(request):
     # comparer le mot de passe saisi avec le hash stocké
     if not verifier_password(data['mot_de_passe'], utilisateur.mot_de_passe):
         return JsonResponse({'error': "Le mot de passe n'existe pas ou incorrect"}, status=401)
+
+    # compte suspendu par un admin (voir Utilisateur.bloquer, toggleBloquerUtilisateur
+    # ci-dessous) : refuser la connexion avant même de créer un token
+    if utilisateur.est_bloquer:
+        return JsonResponse({'error': "Ce compte a été bloqué par un administrateur"}, status=403)
 
     # marquer l'utilisateur comme en ligne
     if not utilisateur.est_actif:
@@ -918,6 +928,102 @@ def listerUtilisateursAdmin(request):
     }, status=200)
 
 
+# ── ADMIN — BLOQUER / DÉBLOQUER UN COMPTE ─────────────────────────────────────
+@csrf_exempt
+def toggleBloquerUtilisateur(request):
+    """
+    Bloque ou débloque un compte utilisateur (accès réservé au rôle admin).
+    Voir Utilisateur.bloquer()/debloquer() (Registration/models.py) : bloquer
+    invalide immédiatement toute session active du compte visé.
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    if admin.profil.role != 'admin':
+        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable'}, status=404)
+
+    # un admin ne doit pas pouvoir se bloquer lui-même (perte d'accès sans
+    # personne d'autre pour le débloquer, si c'est le seul compte admin)
+    if cible.id == admin.id:
+        return JsonResponse({'error': 'Vous ne pouvez pas bloquer votre propre compte'}, status=400)
+
+    if cible.est_bloquer:
+        cible.debloquer()
+        message = 'Compte débloqué avec succès'
+    else:
+        cible.bloquer()
+        message = 'Compte bloqué avec succès'
+
+    return JsonResponse({
+        'message':     message,
+        'utilisateur': {**_serialiseUtilisateur(cible), 'role': cible.profil.role},
+    }, status=200)
+
+
+# ── ADMIN — TABLEAU DE BORD (STATISTIQUES) ────────────────────────────────────
+@csrf_exempt
+def dashboardAdmin(request):
+    """
+    Statistiques agrégées pour le tableau de bord admin (accès réservé au rôle
+    admin) — le frontend n'affiche l'entrée de menu "Dashboard" que si
+    profil.role == 'admin' (voir _serialiseProfil, exposé par /Registration/profil/).
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    if utilisateur.profil.role != 'admin':
+        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+
+    from Produits.models import Produits, Categories
+
+    return JsonResponse({
+        'utilisateurs': {
+            'total':     Utilisateur.objects.count(),
+            'acheteurs': Profil.objects.filter(role='acheteur').count(),
+            'vendeurs':  Profil.objects.filter(role='vendeur').count(),
+            'admins':    Profil.objects.filter(role='admin').count(),
+            'bloques':   Utilisateur.objects.filter(est_bloquer=True).count(),
+            'actifs':    Utilisateur.objects.filter(est_actif=True).count(),
+        },
+        'entreprises': {
+            'total':    Entreprise.objects.count(),
+            'verifiees': Entreprise.objects.filter(est_verifiee=True).count(),
+        },
+        'verifications': {
+            'en_attente':          DemandeVerification.objects.filter(statut='en_attente').count(),
+            'en_attente_manuelle': DemandeVerification.objects.filter(statut='en_attente_manuelle').count(),
+            'verifiees':           DemandeVerification.objects.filter(statut='verifie').count(),
+            'echouees':            DemandeVerification.objects.filter(statut='echoue').count(),
+        },
+        'produits': {
+            'total':      Produits.objects.count(),
+            'disponibles': Produits.objects.filter(est_disponible=True).count(),
+            'categories':  Categories.objects.count(),
+        },
+    }, status=200)
+
+
 # ── ADMIN — LISTER LES DEMANDES DE VÉRIFICATION ENTREPRISE ───────────────────
 @csrf_exempt
 def lister_demandes_admin(request):
@@ -1226,11 +1332,12 @@ def _lancer_pipeline_ocr(demande):
         for cle, valeur in infos.items():
             print(f"  {cle} : {valeur}")
 
-        # permis de conduire : seul le NIF est vérifié (décision produit) —
-        # nom/prénom/date de naissance ne sont ni exigés ni cross-vérifiés,
-        # contrairement au passeport et à la CIN
+        # permis de conduire : nom/prénom (fusionnés dans le champ NOM, voir
+        # extraire_infos_piece) et NIF sont exigés et cross-vérifiés comme
+        # passeport/CIN — seule la date de naissance ne l'est pas (absente du
+        # permis)
         if demande.type_document == 'permis':
-            champs_obligatoires = (infos['numero_piece'],)
+            champs_obligatoires = (infos['nom'], infos['prenom'], infos['numero_piece'])
         else:
             champs_obligatoires = (infos['nom'], infos['prenom'], infos['numero_piece'], infos['date_naissance'])
         if infos['confiance'] < SEUIL_CONFIANCE_MINIMUM or not all(champs_obligatoires):
@@ -1248,10 +1355,11 @@ def _lancer_pipeline_ocr(demande):
 
         # le nom/prénom du compte doit correspondre à la pièce fournie — sinon
         # n'importe qui pourrait soumettre le document d'identité d'un tiers.
-        # Exception permis : seul le NIF est vérifié (voir plus haut), la
-        # correspondance d'identité reste couverte par la vérification faciale
+        # S'applique aussi au permis depuis que nom/prénom en sont extraits
+        # (voir plus haut) — la vérification faciale reste une couche
+        # supplémentaire, pas un substitut à ce cross-check.
         utilisateur = demande.utilisateur
-        if demande.type_document != 'permis' and (
+        if (
                 _normaliser_identifiant(infos['nom']) != _normaliser_identifiant(utilisateur.nom)
                 or _normaliser_identifiant(infos['prenom']) != _normaliser_identifiant(utilisateur.prenom)):
             demande.marquer_echoue(
@@ -1335,9 +1443,8 @@ def _lancer_verification_faciale(demande):
     demande.score_correspondance_visage = resultat['score_confiance']
     demande.save()
 
-    # decision basee sur le "verified" natif de DeepFace (seuil calibre par
-    # modele, voir face_service.py) — score_confiance est stocke pour
-    # audit/debogage mais ne conditionne plus le resultat (voir face_service.py)
+    # decision basee sur un seuil de 35% de confiance (voir face_worker.py /
+    # face_service.py) — score_confiance est aussi stocke pour audit/debogage
     if not resultat['correspond']:
         # resultat['erreur'] est renseigné quand DeepFace n'a détecté aucun
         # visage dans une des deux images (face_worker.py) — un motif bien
@@ -1419,6 +1526,7 @@ def _serialiseUtilisateur(utilisateur):
         'email':            utilisateur.email,
         'telephone':        utilisateur.telephone,
         'est_actif':        utilisateur.est_actif,        # True = en ligne, False = hors ligne
+        'est_bloquer':      utilisateur.est_bloquer,       # True = compte suspendu par un admin
         'date_inscription': utilisateur.date_inscription.isoformat(),  # format ISO 8601
     }
 
