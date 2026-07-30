@@ -12,6 +12,12 @@ urlpatterns = [
     path('categories/choisir/',    views.choisirCategoriesVendeur),  # POST — choisir ses catégories de vente (vendeur, obligatoire)
     path('categories/mes-categories/', views.mesCategoriesVendeur),  # GET  — catégories déjà choisies par le vendeur connecté
 
+    # ── SOUS-CATÉGORIES ────────────────────────────────────────────────────────
+    path('sous-categories/',           views.listerSousCategories),    # GET    — lister (filtre optionnel ?categorie_id=)
+    path('sous-categories/creer/',     views.creerSousCategorie),      # POST   — créer une sous-catégorie (admin)
+    path('sous-categories/modifier/',  views.modifierSousCategorie),   # PUT    — modifier une sous-catégorie (admin)
+    path('sous-categories/supprimer/', views.supprimerSousCategorie),  # DELETE — supprimer une sous-catégorie (admin)
+
     # ── PRODUITS ───────────────────────────────────────────────────────────────
     path('creer/',                 views.creerProduit),                 # POST   — créer un produit (vendeur)
     path('lister/',                views.listerProduits),                # GET    — lister les produits (filtres en query string)
@@ -20,6 +26,9 @@ urlpatterns = [
     path('modifier/',              views.modifierProduit),               # PUT    — modifier un produit (propriétaire)
     path('toggle-disponibilite/',  views.toggleDisponibiliteProduit),    # PUT    — basculer la disponibilité (propriétaire)
     path('supprimer/',             views.supprimerProduit),              # DELETE — supprimer un produit (propriétaire)
+    path('contacter/',             views.contacterProduit),              # POST   — enregistrer un contact acheteur->vendeur (public)
+    path('contacts/historique/',   views.historiqueContactsVendeur),     # GET    — historique des contacts reçus (vendeur connecté)
+    path('vendeur/',               views.infoVendeur),                   # GET    — infos publiques d'un vendeur (?vendeur_id=)
 
     # ── PHOTOS DE PRODUIT ─────────────────────────────────────────────────────
     path('photos/ajouter/',        views.ajouterPhotosProduit),   # POST   — ajouter une/plusieurs photos (propriétaire, multipart)

@@ -977,6 +977,50 @@ def toggleBloquerUtilisateur(request):
     }, status=200)
 
 
+# ── ADMIN — NOMMER UN AUTRE COMPTE ADMINISTRATEUR ────────────────────────────
+@csrf_exempt
+def nommerAdminUtilisateur(request):
+    """
+    Nomme un compte administrateur (accès réservé au rôle admin) — voir
+    Profil.convertir_en_admin() (Registration/models.py). Action irréversible
+    depuis cet écran (pas de "rétrograder" symétrique) : chaque promotion doit
+    donc être délibérée, d'où la confirmation demandée côté frontend
+    (AdminDashboard.jsx) avant l'appel.
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    if admin.profil.role != 'admin':
+        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable'}, status=404)
+
+    if cible.profil.role == 'admin':
+        return JsonResponse({'error': 'Ce compte est déjà administrateur'}, status=400)
+
+    cible.profil.convertir_en_admin()
+
+    return JsonResponse({
+        'message':     'Compte nommé administrateur avec succès',
+        'utilisateur': {**_serialiseUtilisateur(cible), 'role': cible.profil.role},
+    }, status=200)
+
+
 # ── ADMIN — TABLEAU DE BORD (STATISTIQUES) ────────────────────────────────────
 @csrf_exempt
 def dashboardAdmin(request):

@@ -177,6 +177,12 @@ class Profil(models.Model):
         self.role = 'acheteur'
         self.save()
 
+    def convertir_en_admin(self):
+        """Nomme ce compte administrateur — voir nommerAdminUtilisateur
+        (Registration/views.py), action réservée aux admins existants."""
+        self.role = 'admin'
+        self.save()
+
     def a_choisi_categories(self):
         """Vrai si le vendeur a déjà choisi au moins une catégorie de produit
         (étape obligatoire après validation KYC, voir Produits/views/produitsViews.py:creerProduit)."""

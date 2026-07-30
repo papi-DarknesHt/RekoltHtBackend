@@ -40,13 +40,13 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'rest_framework',
+    'django.contrib.staticfiles',    'rest_framework',
     'corsheaders',
     'Api',
     'RekoltHt',
     'Produits',
     'Registration',
+    'Messagerie',
     'social_django',
 ]
 # ne pas toucher
@@ -68,7 +68,7 @@ STATIC_URL          = '/static/'
 STATIC_ROOT         = os.path.join(BASE_DIR, 'staticfiles')
 
 # autoriser la communication entre react et django
-CORS_ALLOWED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com"]
+CORS_ALLOWED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com","http://192.168.1.4:5173"]
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = [
     "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"
@@ -83,7 +83,7 @@ CORS_ALLOW_HEADERS = [
     "x-requested-with",
 ]
 # autorise les requete post avec CSRF
-CSRF_TRUSTED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com/"]
+CSRF_TRUSTED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com/","http://192.168.1.4:5173"]
 
 # ASGI ET WebSocket
 ASGI_APPLICATION = 'BackendRekoltHt.asgi.application'

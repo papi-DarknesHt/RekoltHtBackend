@@ -36,6 +36,7 @@ urlpatterns = [
     # ── ADMINISTRATION ────────────────────────────────────────────────────────
     path('admin/utilisateurs/', views.listerUtilisateursAdmin),   # GET — liste tous les utilisateurs (rôle admin requis)
     path('admin/utilisateurs/bloquer/', views.toggleBloquerUtilisateur),  # PUT — bloque/débloque un compte (rôle admin requis)
+    path('admin/utilisateurs/nommer-admin/', views.nommerAdminUtilisateur),  # PUT — nomme un compte administrateur (rôle admin requis)
     path('admin/verifications-entreprise/', views.lister_demandes_admin),  # GET — demandes entreprise en attente (rôle admin requis)
     path('admin/dashboard/',    views.dashboardAdmin),             # GET — statistiques agrégées (rôle admin requis)
 

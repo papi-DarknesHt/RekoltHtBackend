@@ -24,9 +24,9 @@ from .base import *  # noqa: F401,F403 — réglages communs (INSTALLED_APPS, MI
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1','192.168.1.4']
 # autoriser la communication entre react et django
-CORS_ALLOWED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com"]
+CORS_ALLOWED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com",'http://192.168.1.4:5173']
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = [
     "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"
