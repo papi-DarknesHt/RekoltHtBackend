@@ -16,9 +16,17 @@ def creer_profil(sender, instance, created, **kwargs):
     Garantit que chaque utilisateur a toujours un profil.
     Une Entreprise démarre 'acheteur' comme n'importe quel compte — elle peut
     ensuite devenir 'vendeur' via Profil.convertir_en_vendeur().
+
+    Le tout premier compte créé sur la plateforme (aucun autre Utilisateur en
+    base avant celui-ci) devient automatiquement 'admin' — sans ça, personne
+    n'aurait accès au dashboard admin/à la gestion des catégories sur une
+    instance fraîchement déployée, faute d'un moyen de promouvoir un compte
+    autrement que par un admin déjà existant.
     """
-    if created:
-        Profil.objects.create(utilisateur=instance)
+    if not created:
+        return
+    role = 'admin' if Utilisateur.objects.count() == 1 else 'acheteur'
+    Profil.objects.create(utilisateur=instance, role=role)
 
 
 # ── BROADCAST WEBSOCKET — NOUVEL UTILISATEUR ─────────────────────────────────
@@ -32,11 +40,26 @@ def broadcast_utilisateur(sender, instance, created, **kwargs):
     """
     event_type = "utilisateur.created" if created else "utilisateur.updated"
 
+    # même champs que _serialiseUtilisateur (Registration/views.py) + role,
+    # pour que le dashboard admin (AdminDashboard.jsx) affiche un utilisateur
+    # complet dès l'évènement temps réel, sans attendre un rechargement de
+    # page pour récupérer telephone/est_bloquer/role. instance.profil existe
+    # déjà à ce point : creer_profil (même signal post_save, déclaré avant
+    # dans ce fichier donc appelé en premier) l'a créé juste avant.
     broadcast(event_type, {
-        "id":     str(instance.id),   # UUID converti en string
-        "nom":    instance.nom,
-        "prenom": instance.prenom,
-        "email":  instance.email,
+        # id en entier (comme _serialiseUtilisateur, Registration/views.py) —
+        # pas de str() : Utilisateur.id est un AutoField, pas un UUID, et le
+        # frontend (applyListEvent.js) compare les id avec ===, donc un
+        # mismatch de type casserait le rapprochement avec la liste REST
+        "id":               instance.id,
+        "nom":              instance.nom,
+        "prenom":           instance.prenom,
+        "email":            instance.email,
+        "telephone":        instance.telephone,
+        "est_actif":        instance.est_actif,
+        "est_bloquer":      instance.est_bloquer,
+        "date_inscription": instance.date_inscription.isoformat(),
+        "role":             instance.profil.role,
     })
 
 
@@ -47,7 +70,7 @@ def broadcast_utilisateur_supprime(sender, instance, **kwargs):
     Notifie React quand un utilisateur est supprimé.
     """
     broadcast("utilisateur.deleted", {
-        "id": str(instance.id),
+        "id": instance.id,
     })
 
 
@@ -61,7 +84,8 @@ def broadcast_profil(sender, instance, created, **kwargs):
     """
     if not created:
         broadcast("profil.updated", {
-            "user_id":   str(instance.utilisateur.id),
+            "user_id":   instance.utilisateur.id,
+            "role":      instance.role,  # ex: acheteur -> vendeur via convertir_en_vendeur()/KYC (marquer_verifie)
             "commune":   instance.commune,
             "adresse":   instance.adresse,
             "ville":     instance.ville,
@@ -79,7 +103,7 @@ def broadcast_profil_supprime(sender, instance, **kwargs):
     Notifie React quand un profil est supprimé.
     """
     broadcast("profil.deleted", {
-        "user_id": str(instance.utilisateur.id),
+        "user_id": instance.utilisateur.id,
     })
 
 

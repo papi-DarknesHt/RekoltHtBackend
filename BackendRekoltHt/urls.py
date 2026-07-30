@@ -28,6 +28,11 @@ urlpatterns = [
     # Ex: /produits/lister/, /produits/creer/, /produits/categories/…
     path('produits/', include('Produits.urls')),
 
+    # ── MESSAGERIE ─────────────────────────────────────────────────────────────
+    # Routes définies dans Messagerie/urls.py
+    # Ex: /messagerie/conversations/, /messagerie/messages/envoyer/…
+    path('messagerie/', include('Messagerie.urls')),
+
 ]
 
 # ── FICHIERS MÉDIAS EN DÉVELOPPEMENT ──────────────────────────────────────────

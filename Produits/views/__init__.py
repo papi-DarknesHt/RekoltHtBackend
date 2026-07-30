@@ -14,9 +14,18 @@ from .produitsViews import (
     modifierProduit,
     toggleDisponibiliteProduit,
     supprimerProduit,
+    contacterProduit,
+    infoVendeur,
+    historiqueContactsVendeur,
 )
 from .photoProduits import (
     ajouterPhotosProduit,
     listerPhotosProduit,
     supprimerPhotoProduit,
+)
+from .sousCategoriesViews import (
+    listerSousCategories,
+    creerSousCategorie,
+    modifierSousCategorie,
+    supprimerSousCategorie,
 )
