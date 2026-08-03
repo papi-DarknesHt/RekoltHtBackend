@@ -20,7 +20,7 @@ def _serialiseSousCategorie(sous_categorie):
 def listerSousCategories(request):
     """Liste les sous-catégories, filtrables par catégorie parente (?categorie_id=) — public."""
     if request.method != 'GET':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     sous_categories = sousCategories.objects.select_related('categorie').all()
 
@@ -38,28 +38,28 @@ def listerSousCategories(request):
 def creerSousCategorie(request):
     """Crée une sous-catégorie, rattachée à une catégorie existante (accès réservé au rôle admin)."""
     if request.method != 'POST':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     for field in ['nom', 'categorie_id']:
         if not data.get(field):
-            return JsonResponse({'error': f'Le champ {field} est requis'}, status=400)
+            return JsonResponse({'error': f'Le champ {field} est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': field}}, status=400)
 
     try:
         categorie = Categories.objects.get(id=data['categorie_id'])
     except Categories.DoesNotExist:
-        return JsonResponse({'error': 'Catégorie introuvable'}, status=404)
+        return JsonResponse({'error': 'Catégorie introuvable', 'error_code': 'CATEGORY_NOT_FOUND'}, status=404)
 
     sous_categorie = sousCategories.objects.create(categorie=categorie, nom=data['nom'])
 
@@ -74,33 +74,33 @@ def creerSousCategorie(request):
 def modifierSousCategorie(request):
     """Met à jour une sous-catégorie (nom et/ou catégorie parente) — accès réservé au rôle admin."""
     if request.method != 'PUT':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     if 'id' not in data:
-        return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
 
     try:
         sous_categorie = sousCategories.objects.get(id=data['id'])
     except sousCategories.DoesNotExist:
-        return JsonResponse({'error': 'Sous-catégorie introuvable'}, status=404)
+        return JsonResponse({'error': 'Sous-catégorie introuvable', 'error_code': 'SUBCATEGORY_NOT_FOUND'}, status=404)
 
     if 'categorie_id' in data:
         try:
             sous_categorie.categorie = Categories.objects.get(id=data['categorie_id'])
         except Categories.DoesNotExist:
-            return JsonResponse({'error': 'Catégorie introuvable'}, status=404)
+            return JsonResponse({'error': 'Catégorie introuvable', 'error_code': 'CATEGORY_NOT_FOUND'}, status=404)
 
     if 'nom' in data:
         sous_categorie.nom = data['nom']
@@ -118,27 +118,27 @@ def modifierSousCategorie(request):
 def supprimerSousCategorie(request):
     """Supprime une sous-catégorie (accès réservé au rôle admin)."""
     if request.method != 'DELETE':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     if 'id' not in data:
-        return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
 
     try:
         sous_categorie = sousCategories.objects.get(id=data['id'])
     except sousCategories.DoesNotExist:
-        return JsonResponse({'error': 'Sous-catégorie introuvable'}, status=404)
+        return JsonResponse({'error': 'Sous-catégorie introuvable', 'error_code': 'SUBCATEGORY_NOT_FOUND'}, status=404)
 
     sous_categorie.delete()
 

@@ -117,7 +117,7 @@ def generer_contrat(demande: DemandeVerification) -> ContentFile:
         return _construire_contrat_pdf(
             nom_affiche         = entreprise.nom_Entreprise,
             type_piece_libelle  = "Certificat de patente",
-            numero_piece        = demande.numero_piece_saisi or demande.numero_patente_extrait or entreprise.num_Enregistrement,
+            numero_piece        = demande.numero_piece_saisi or demande.numero_patente_extrait,
             photo_identite      = _lire_fichier(entreprise.logo),
             photo_document      = _lire_fichier(demande.certificat_patente),
             document_est_pdf    = _est_pdf(demande.certificat_patente),

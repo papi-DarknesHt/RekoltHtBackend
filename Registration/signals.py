@@ -58,6 +58,7 @@ def broadcast_utilisateur(sender, instance, created, **kwargs):
         "telephone":        instance.telephone,
         "est_actif":        instance.est_actif,
         "est_bloquer":      instance.est_bloquer,
+        "desactive_par_signalements": instance.desactive_par_signalements,
         "date_inscription": instance.date_inscription.isoformat(),
         "role":             instance.profil.role,
     })

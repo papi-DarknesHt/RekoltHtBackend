@@ -1,7 +1,7 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from Api.broadcast import broadcast, broadcast_to_user
-from .models import Produits, Categories, sousCategories, ContactProduit
+from .models import Produits, Categories, sousCategories, ContactProduit, AvisProduit
 
 
 def _serialiser_produit(produit):
@@ -19,16 +19,20 @@ def _serialiser_produit(produit):
         'unitePrix':       produit.unitePrix,
         'unite_De_Mesure': produit.unite_De_Mesure,
         'est_disponible':  produit.est_disponible,
+        'desactive_par_signalements': produit.desactive_par_signalements,
         'categorie':       {'id': produit.categorie_id, 'nom': produit.categorie.nom},
         'sous_categorie':  {'id': produit.sous_categorie_id, 'nom': produit.sous_categorie.nom} if produit.sous_categorie_id else None,
         'vendeur_id':      produit.vendeur_id,
         'vendeur_nom':     _nomVendeur(produit.vendeur),
+        'vendeur_telephone': produit.vendeur.telephone,
         'departement':     produit.departement,
         'commune':         produit.commune,
         'section_comunale': produit.section_comunale,
         'adresse':         produit.adresse,
         'region':          produit.region,
         'nombre_contacts': produit.nombre_contacts,
+        'note_moyenne':    produit.note_moyenne,
+        'nombre_avis':     produit.nombre_avis,
     }
 
 
@@ -111,3 +115,42 @@ def broadcast_contact_produit(sender, instance, created, **kwargs):
         'acheteur_nom': _nomVendeur(instance.acheteur) if instance.acheteur_id else None,
         'date_contact': instance.date_contact.isoformat(),
     })
+
+
+# ── AVIS PRODUIT — recalcul de la moyenne + diffusion temps réel ─────────────
+def _serialiser_avis(avis):
+    from .views.produitsViews import _nomVendeur
+    return {
+        'id':                avis.id,
+        'produit_id':        avis.produit_id,
+        'auteur_id':         avis.auteur_id,
+        'auteur_nom':        _nomVendeur(avis.auteur) if avis.auteur_id else None,
+        'note':              avis.note,
+        'commentaire':       avis.commentaire,
+        'date_avis':         avis.date_avis.isoformat(),
+        'date_modification': avis.date_modification.isoformat(),
+    }
+
+
+@receiver(post_save, sender=AvisProduit)
+def broadcast_avis(sender, instance, created, **kwargs):
+    """
+    Recalcule note_moyenne/nombre_avis du produit concerné puis diffuse à
+    "global" : l'avis lui-même (pour la liste affichée sur la fiche produit)
+    et le produit mis à jour (pour que les cartes/listes déjà affichées
+    reflètent la nouvelle moyenne sans rechargement, même mécanisme que
+    broadcast_produit ci-dessus).
+    """
+    instance.produit.recalculer_note()
+    broadcast("avis.created" if created else "avis.updated", _serialiser_avis(instance))
+    broadcast("produit.updated", _serialiser_produit(instance.produit))
+
+
+@receiver(post_delete, sender=AvisProduit)
+def broadcast_avis_supprime(sender, instance, **kwargs):
+    # le produit peut avoir été supprimé juste avant (CASCADE) — auquel cas
+    # le recalcul/broadcast du produit n'a plus de sens
+    if Produits.objects.filter(id=instance.produit_id).exists():
+        instance.produit.recalculer_note()
+        broadcast("produit.updated", _serialiser_produit(instance.produit))
+    broadcast("avis.deleted", {'id': instance.id, 'produit_id': instance.produit_id})

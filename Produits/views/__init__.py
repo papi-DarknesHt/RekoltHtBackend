@@ -16,12 +16,31 @@ from .produitsViews import (
     supprimerProduit,
     contacterProduit,
     infoVendeur,
+    listerVendeursCarte,
     historiqueContactsVendeur,
+    reactiverProduitAdmin,
+    statistiquesVendeurPdf,
 )
 from .photoProduits import (
     ajouterPhotosProduit,
     listerPhotosProduit,
     supprimerPhotoProduit,
+)
+from .signalementsViews import (
+    signalerProduit,
+    listerSignalementsAdmin,
+    traiterSignalement,
+    signalerVendeur,
+    listerSignalementsVendeursAdmin,
+    traiterSignalementVendeur,
+    signalerAvis,
+    listerSignalementsAvisAdmin,
+    traiterSignalementAvis,
+)
+from .avisViews import (
+    creerModifierAvis,
+    listerAvisProduit,
+    supprimerAvis,
 )
 from .sousCategoriesViews import (
     listerSousCategories,

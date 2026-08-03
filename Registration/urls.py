@@ -36,6 +36,8 @@ urlpatterns = [
     # ── ADMINISTRATION ────────────────────────────────────────────────────────
     path('admin/utilisateurs/', views.listerUtilisateursAdmin),   # GET — liste tous les utilisateurs (rôle admin requis)
     path('admin/utilisateurs/bloquer/', views.toggleBloquerUtilisateur),  # PUT — bloque/débloque un compte (rôle admin requis)
+    path('admin/utilisateurs/supprimer/', views.supprimerUtilisateurAdmin),  # DELETE — supprime définitivement un compte (rôle admin requis)
+    path('admin/utilisateurs/reactiver-vendeur/', views.reactiverVendeurAdmin),  # PUT — lève la suspension par signalements d'un vendeur (rôle admin requis)
     path('admin/utilisateurs/nommer-admin/', views.nommerAdminUtilisateur),  # PUT — nomme un compte administrateur (rôle admin requis)
     path('admin/verifications-entreprise/', views.lister_demandes_admin),  # GET — demandes entreprise en attente (rôle admin requis)
     path('admin/dashboard/',    views.dashboardAdmin),             # GET — statistiques agrégées (rôle admin requis)
@@ -44,4 +46,12 @@ urlpatterns = [
     path('reinitialisation/demander/',      views.demanderReinitialisation),      # POST — envoyer le code PIN par email
     path('reinitialisation/verifier-code/', views.verifierCodeReinitialisation),  # POST — vérifier le code sans changer le mdp
     path('reinitialisation/valider/',       views.reinitialiserMotDePasse),       # POST — changer le mdp après validation du code
+
+    # ── CONTACT ────────────────────────────────────────────────────────────────
+    path('contact/', views.contacterNous),  # POST — page "Contactez-nous" (public, aucun compte requis)
+
+    # ── CLÉ DE CHIFFREMENT (messagerie de bout en bout) ─────────────────────────
+    path('cle-chiffrement/',           views.cleChiffrement),          # GET/POST/PUT — propre matériel de clé
+    path('cle-chiffrement/publique/',  views.clePubliqueUtilisateur),  # GET — clé publique d'un utilisateur (?utilisateur_id=)
+    path('cle-chiffrement/admins/',    views.clesPubliquesAdmins),     # GET — clés publiques de tous les admins configurés
 ]

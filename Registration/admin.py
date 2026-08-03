@@ -55,10 +55,10 @@ class ProfilAdmin(admin.ModelAdmin):
 # Entreprise hérite d'Utilisateur : elle possède désormais son propre email/téléphone de connexion.
 @admin.register(Entreprise)
 class EntrepriseAdmin(admin.ModelAdmin):
-    list_display  = ('id', 'nom_Entreprise', 'num_Enregistrement', 'email', 'proprietaire',
+    list_display  = ('id', 'nom_Entreprise', 'email', 'proprietaire',
                       'secteur', 'est_verifiee', 'statut_verification', 'date_creation')
     list_filter   = ('secteur', 'est_verifiee', 'statut_verification', 'pays')
-    search_fields = ('nom_Entreprise', 'num_Enregistrement', 'email')
+    search_fields = ('nom_Entreprise', 'email')
     ordering      = ('id',)
 
 

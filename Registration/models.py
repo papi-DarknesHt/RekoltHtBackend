@@ -35,6 +35,21 @@ class Utilisateur(models.Model):
     date_inscription = models.DateTimeField(auto_now_add=True)     # date de création, non modifiable
     est_actif        = models.BooleanField(default=False)          # True = utilisateur en ligne sur le site
     est_bloquer      = models.BooleanField(default=False)          # True = compte suspendu par un admin
+    # passe à True automatiquement dès que le compte reçoit plus de 5
+    # signalements pour le même motif (voir signalerVendeur,
+    # Produits/views/signalementsViews.py) : le vendeur ne peut plus publier de
+    # nouveau produit et tous ses produits existants deviennent indisponibles
+    # (Produits.est_disponible mis à False) — seul un admin peut lever cette
+    # suspension (reactiverVendeurAdmin, Registration/views.py), ce qui rend
+    # alors tous ses produits (non bannis individuellement) de nouveau
+    # disponibles. Distinct de est_bloquer : ce champ-ci ne coupe pas l'accès
+    # au compte, seulement la capacité à vendre.
+    desactive_par_signalements = models.BooleanField(default=False)
+    # incrémenté à chaque consultation du profil public d'un vendeur (voir
+    # infoVendeur, Produits/views/produitsViews.py) — alimente le graphique
+    # "vues du profil" du tableau de bord vendeur (voir statistiquesVendeur,
+    # Produits/views/produitsViews.py)
+    nombre_vues_profil = models.PositiveIntegerField(default=0)
 
     class Meta:
         db_table            = 'utilisateur'    # nom de la table SQL
@@ -59,6 +74,16 @@ class Utilisateur(models.Model):
     def possede_entreprise(self):
         """Retourne True si ce compte gère au moins une entreprise enregistrée."""
         return self.entreprises.exists()   # 'entreprises' = related_name du ForeignKey proprietaire de Entreprise
+
+    def incrementer_vues_profil(self):
+        """Incrémente nombre_vues_profil de façon atomique — via .update() (pas
+        .save()) pour ne PAS déclencher broadcast_utilisateur (Registration/signals.py) :
+        même raisonnement que Produits.incrementer_vues (Produits/models/produitsModels.py) :
+        une consultation de profil est un évènement à haute fréquence qu'il
+        serait inutile de diffuser en temps réel à tous les clients connectés."""
+        from django.db.models import F
+        type(self).objects.filter(id=self.id).update(nombre_vues_profil=F('nombre_vues_profil') + 1)
+        self.nombre_vues_profil += 1
 
     def bloquer(self):
         """Suspend le compte (accès admin, voir Registration/views.py::toggleBloquerUtilisateur)
@@ -126,7 +151,9 @@ class Profil(models.Model):
     bio          = models.TextField(blank=True, null=True)                               # description libre
     photo_profil = models.ImageField(upload_to='photos_profil/', blank=True, null=True)  # stockée dans /media/photos_profil/
     adresse      = models.CharField(max_length=255, blank=True)
+    departement  = models.CharField(max_length=100, blank=True)   # ex. "OUEST" — voir haiti_departements.json côté frontend
     commune      = models.CharField(max_length=100, blank=True)
+    section_communale = models.CharField(max_length=150, blank=True)
     ville        = models.CharField(max_length=100, blank=True)
     pays         = models.CharField(max_length=100, default='Haiti')
     longitude    = models.FloatField(blank=True, null=True)   # coordonnée GPS (axe Est-Ouest)
@@ -262,7 +289,6 @@ class Entreprise(Utilisateur):
                              blank        = True,             # (proprietaire == elle-même, assigné après création)
                            )
     nom_Entreprise      = models.CharField(max_length=100, unique=True)   # nom unique sur la plateforme
-    num_Enregistrement  = models.CharField(max_length=100, unique=True)   # numéro légal unique
     secteur             = models.CharField(
                              max_length = 20,
                              choices    = SECTEURS,
@@ -270,7 +296,9 @@ class Entreprise(Utilisateur):
                            )
     description         = models.TextField(blank=True, null=True)
     adresse             = models.CharField(max_length=255, blank=True)
+    departement         = models.CharField(max_length=100, blank=True)
     commune             = models.CharField(max_length=100, blank=True)
+    section_communale   = models.CharField(max_length=150, blank=True)
     pays                = models.CharField(max_length=100, default='Haiti')
     logo                = models.ImageField(upload_to='logos_entreprise/', blank=True, null=True)  # stocké dans /media/logos_entreprise/
     longitude           = models.FloatField(blank=True, null=True)
@@ -291,7 +319,7 @@ class Entreprise(Utilisateur):
         ordering            = ['id']
 
     def __str__(self):
-        return f"{self.nom_Entreprise} ({self.num_Enregistrement})"
+        return self.nom_Entreprise
 
     def mettre_a_jour(self, **kwargs):
         """Met à jour dynamiquement les champs passés en arguments nommés."""
@@ -354,7 +382,7 @@ class DemandeVerification(models.Model):
     # avancement du traitement de la demande
     STATUTS = [
         ('en_attente',          'En attente'),
-        ('en_attente_manuelle', 'En attente de revue manuelle'),  # pipeline auto incomplet (ex: guichet.mci.ht indisponible) — voir _verifier_patente_mci
+        ('en_attente_manuelle', 'En attente de revue manuelle'),  # plus jamais produit automatiquement par le pipeline (voir Registration/views.py::_lancer_pipeline_ocr) — conservé pour un usage manuel éventuel
         ('verifie',             'Vérifié'),
         ('echoue',              'Échoué'),
     ]
@@ -549,3 +577,39 @@ class Token(models.Model):
 
     def __str__(self):
         return f"Token de {self.utilisateur.email}"
+
+
+# ── MODÈLE CLÉ DE CHIFFREMENT (messagerie de bout en bout) ───────────────────
+class CleChiffrementUtilisateur(models.Model):
+    """
+    Matériel de clé asymétrique (ECDH P-256) permettant le chiffrement de bout
+    en bout de la messagerie (voir Messagerie/models.py::Message.chiffre et
+    MessageSupport). La clé publique est stockée en clair (par définition non
+    secrète). La clé privée n'est JAMAIS connue du serveur : elle est générée
+    et chiffrée côté navigateur avec une clé dérivée d'un code PIN choisi par
+    l'utilisateur (PBKDF2), puis seul le résultat chiffré est envoyé ici — le
+    serveur ne peut donc jamais lire le contenu des messages.
+    """
+
+    utilisateur = models.OneToOneField(
+                    Utilisateur,
+                    on_delete    = models.CASCADE,
+                    related_name = 'cle_chiffrement'
+                  )
+
+    cle_publique       = models.TextField()                # JWK JSON de la clé publique ECDH
+    cle_privee_chiffree = models.TextField()                # clé privée (JWK JSON) chiffrée AES-GCM, en base64
+    iv_cle_privee       = models.CharField(max_length=64)   # IV (base64) utilisé pour ce chiffrement
+    sel_kdf             = models.CharField(max_length=64)   # sel (base64) utilisé par PBKDF2 pour dériver la clé depuis le PIN
+    iterations_kdf       = models.PositiveIntegerField(default=210000)   # nombre d'itérations PBKDF2, conservé pour pouvoir l'ajuster sans casser les clés déjà enveloppées
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_maj      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table            = 'cle_chiffrement_utilisateur'
+        verbose_name        = 'Clé de chiffrement'
+        verbose_name_plural = 'Clés de chiffrement'
+
+    def __str__(self):
+        return f"Clé de chiffrement de {self.utilisateur.email}"

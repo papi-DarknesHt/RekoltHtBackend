@@ -20,7 +20,7 @@ def _serialiseCategorie(categorie):
 def listerCategories(request):
     """Liste toutes les catégories — public, utilisé pour peupler filtres/formulaires."""
     if request.method != 'GET':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     categories = Categories.objects.all()
 
@@ -34,22 +34,22 @@ def listerCategories(request):
 def creerCategorie(request):
     """Crée une catégorie (accès réservé au rôle admin)."""
     if request.method != 'POST':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     if 'nom' not in data:
-        return JsonResponse({'error': 'Le champ nom est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ nom est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'nom'}}, status=400)
 
     categorie = Categories.objects.create(
         nom         = data['nom'],
@@ -67,27 +67,27 @@ def creerCategorie(request):
 def modifierCategorie(request):
     """Met à jour une catégorie (accès réservé au rôle admin)."""
     if request.method != 'PUT':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     if 'id' not in data:
-        return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
 
     try:
         categorie = Categories.objects.get(id=data['id'])
     except Categories.DoesNotExist:
-        return JsonResponse({'error': 'Catégorie introuvable'}, status=404)
+        return JsonResponse({'error': 'Catégorie introuvable', 'error_code': 'CATEGORY_NOT_FOUND'}, status=404)
 
     for champ in ['nom', 'description']:
         if champ in data:
@@ -105,27 +105,27 @@ def modifierCategorie(request):
 def supprimerCategorie(request):
     """Supprime une catégorie (accès réservé au rôle admin)."""
     if request.method != 'DELETE':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     if 'id' not in data:
-        return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
 
     try:
         categorie = Categories.objects.get(id=data['id'])
     except Categories.DoesNotExist:
-        return JsonResponse({'error': 'Catégorie introuvable'}, status=404)
+        return JsonResponse({'error': 'Catégorie introuvable', 'error_code': 'CATEGORY_NOT_FOUND'}, status=404)
 
     categorie.delete()
 
@@ -145,19 +145,19 @@ def choisirCategoriesVendeur(request):
     simplicité côté frontend (un seul écran de sélection à re-soumettre).
     """
     if request.method != 'POST':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     if utilisateur.profil.role != 'vendeur':
-        return JsonResponse({'error': "Accès réservé aux vendeurs"}, status=403)
+        return JsonResponse({'error': "Accès réservé aux vendeurs", 'error_code': 'VENDEUR_ONLY'}, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     categorie_ids = data.get('categorie_ids')
     if not categorie_ids or not isinstance(categorie_ids, list):
@@ -181,11 +181,11 @@ def mesCategoriesVendeur(request):
     """Retourne les catégories déjà choisies par le vendeur connecté (pour que
     le frontend sache s'il doit afficher l'écran de sélection obligatoire)."""
     if request.method != 'GET':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     categories = utilisateur.profil.categories_produits.all()
 

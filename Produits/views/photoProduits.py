@@ -28,20 +28,20 @@ def ajouterPhotosProduit(request):
     champ texte 'produit_id' + fichiers sous la clé 'photos' (plusieurs possibles).
     """
     if request.method != 'POST':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     produit_id = request.POST.get('produit_id')
     if not produit_id:
-        return JsonResponse({'error': 'Le champ produit_id est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ produit_id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'produit_id'}}, status=400)
 
     try:
         produit = Produits.objects.get(id=produit_id, vendeur=utilisateur)
     except Produits.DoesNotExist:
-        return JsonResponse({'error': 'Produit introuvable'}, status=404)
+        return JsonResponse({'error': 'Produit introuvable', 'error_code': 'PRODUCT_NOT_FOUND'}, status=404)
 
     fichiers = request.FILES.getlist('photos')
     if not fichiers:
@@ -63,11 +63,11 @@ def ajouterPhotosProduit(request):
 def listerPhotosProduit(request):
     """Liste les photos d'un produit donné (public)."""
     if request.method != 'GET':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     produit_id = request.GET.get('produit_id')
     if not produit_id:
-        return JsonResponse({'error': 'Le paramètre produit_id est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ produit_id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'produit_id'}}, status=400)
 
     photos = photo_produits.objects.filter(produits_id=produit_id)
 
@@ -81,19 +81,19 @@ def listerPhotosProduit(request):
 def supprimerPhotoProduit(request):
     """Supprime une photo (fichier physique + ligne en base) d'un produit du vendeur connecté."""
     if request.method != 'DELETE':
-        return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
-        return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
 
     if 'id' not in data:
-        return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
 
     # scoper la recherche au vendeur connecté pour empêcher la suppression de photos tierces
     try:
