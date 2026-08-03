@@ -133,6 +133,16 @@ def _valeur_dans_meme_boite(texte, labels):
         if fin < len(normalise) and normalise[fin].isalpha():
             continue
         reste = texte[fin:].strip(" :./-")
+        # "Délivré à" : PaddleOCR omet parfois l'accent ("Delivre a:GRAIDLOCAL"),
+        # et la préposition "a" (ou "à") se retrouve alors collée au ":" sans
+        # espace la séparant de la vraie valeur ("a:GRAIDLOCAL") — un simple
+        # .strip(" :./-") ne l'enlève pas car "a" n'est pas un caractère de
+        # ponctuation. On la retire explicitement quand elle apparaît seule en
+        # tête, immédiatement suivie de ":" ou "." (constaté en conditions
+        # réelles sur un certificat de patente) ; motif volontairement étroit
+        # (lettre isolée + séparateur collé) pour ne jamais rogner une vraie
+        # valeur commençant par "A" (ex. un nom d'entreprise "Alpha SA").
+        reste = re.sub(r'^[aà][:.]\s*', '', reste, flags=re.IGNORECASE)
         if reste:
             return reste
     return None
@@ -312,11 +322,23 @@ def extraire_infos_piece(chemin_image, type_document):
     numero_brut   = _chercher_valeur_liee(detections, labels_numero, filtre=_ressemble_a_un_numero)
 
     nom_entreprise = None
+    nom = prenom = None
     if type_document is None:   # mode générique (patente) uniquement
         nom_entreprise = _chercher_valeur_liee(detections, _LABELS_ENTREPRISE)
-
-    nom    = _chercher_valeur_liee(detections, _LABELS_NOM, exclure=_LABELS_EXCLUS_NOM)
-    prenom = _chercher_valeur_liee(detections, _LABELS_PRENOM)
+        # un certificat de patente n'a ni champ NOM ni PRENOM (document
+        # d'entreprise, pas une pièce individuelle) : les chercher quand même
+        # ne peut que produire un faux positif — les labels "NOM"/"NON" sont
+        # de simples sous-chaînes (voir _label_present), qui matchent aussi
+        # à l'intérieur de mots sans rapport (ex: "NOM" dans "ÉCONOMIE" sur
+        # l'en-tête, "NON" dans "Non Classées" du secteur d'activité) ; le
+        # garde-fou "lettre suivante non-alphabétique" de
+        # _valeur_dans_meme_boite empêche seulement la valeur fusionnée dans
+        # LA MÊME boîte, pas le repli "boîte voisine la plus proche"
+        # (priorité 2 de _chercher_valeur_liee) qui renvoie alors un fragment
+        # de texte totalement sans rapport — constaté en conditions réelles.
+    else:
+        nom    = _chercher_valeur_liee(detections, _LABELS_NOM, exclure=_LABELS_EXCLUS_NOM)
+        prenom = _chercher_valeur_liee(detections, _LABELS_PRENOM)
 
     # le permis n'a pas de champ PRENOM distinct : nom et prénom sont fusionnés
     # dans la boîte NOM, séparés par un point (ex: "Napoleon.Wagnerson" : nom

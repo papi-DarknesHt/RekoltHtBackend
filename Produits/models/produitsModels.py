@@ -26,6 +26,11 @@ class Produits(models.Model):
     unitePrix       = models.CharField(max_length=20, choices=UNITEPRIX, default="HTG")
     unite_De_Mesure    = models.CharField(max_length=100, blank=True)
     est_disponible  = models.BooleanField(default=False)
+    # passe à True automatiquement au 5e signalement (voir signalerProduit,
+    # Produits/views/signalementsViews.py) et bloque alors est_disponible à
+    # False côté vendeur (modifierProduit/toggleDisponibiliteProduit) — seul
+    # un admin peut lever ce blocage (reactiverProduitAdmin)
+    desactive_par_signalements = models.BooleanField(default=False)
     departement     = models.CharField(max_length=100, blank=True)
     commune         = models.CharField(max_length=100, blank=True)
     section_comunale= models.CharField(max_length=100, blank=True)
@@ -36,6 +41,15 @@ class Produits(models.Model):
     date_ajout      = models.DateTimeField(auto_now_add=True)
     date_maj        = models.DateTimeField(auto_now=True)
     nombre_contacts = models.PositiveIntegerField(default=0)
+    # incrémenté à chaque consultation de la fiche produit (voir detailProduit,
+    # Produits/views/produitsViews.py) — distinct de nombre_contacts (clic sur
+    # "Contacter"/WhatsApp) : sert à l'histogramme "produits les plus
+    # consultés" du tableau de bord admin (voir dashboardAdmin, Registration/views.py)
+    nombre_vues     = models.PositiveIntegerField(default=0)
+    # dénormalisés à partir de AvisProduit (voir Produits/signals.py) — évite
+    # de recalculer une agrégation à chaque affichage de liste/carte produit
+    note_moyenne    = models.FloatField(blank=True, null=True)   # null = aucun avis
+    nombre_avis     = models.PositiveIntegerField(default=0)
 
     class Meta:
         db_table = "produits"
@@ -65,3 +79,24 @@ class Produits(models.Model):
         self.nombre_contacts = F('nombre_contacts') + 1
         self.save(update_fields=['nombre_contacts'])
         self.refresh_from_db(fields=['nombre_contacts'])
+
+    def incrementer_vues(self):
+        """Incrémente nombre_vues de façon atomique — via .update() (pas
+        .save()) pour ne PAS déclencher broadcast_produit (Produits/signals.py) :
+        contrairement à un contact, une consultation de fiche produit est un
+        évènement à haute fréquence (chaque visiteur, à chaque chargement de
+        page) qu'il serait inutile de diffuser en temps réel à tous les
+        clients connectés."""
+        from django.db.models import F
+        type(self).objects.filter(id=self.id).update(nombre_vues=F('nombre_vues') + 1)
+        self.nombre_vues += 1  # reflète la mise à jour ci-dessus sans SELECT supplémentaire
+
+    def recalculer_note(self):
+        """Recalcule note_moyenne/nombre_avis à partir des AvisProduit liés —
+        appelé par les signaux post_save/post_delete de AvisProduit (voir
+        Produits/signals.py), jamais au moment de l'affichage."""
+        from django.db.models import Avg, Count
+        agregat = self.avis.aggregate(moyenne=Avg('note'), total=Count('id'))
+        self.note_moyenne = round(agregat['moyenne'], 2) if agregat['moyenne'] is not None else None
+        self.nombre_avis = agregat['total']
+        self.save(update_fields=['note_moyenne', 'nombre_avis'])

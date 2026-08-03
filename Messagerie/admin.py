@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Conversation, Message, MessageSupport
+from .models import Conversation, Message, MessageSupport, SignalementMessage
 
 
 @admin.register(Conversation)
@@ -17,3 +17,10 @@ class MessageAdmin(admin.ModelAdmin):
 class MessageSupportAdmin(admin.ModelAdmin):
     list_display = ['id', 'vendeur', 'date_envoi', 'admin_repondant', 'date_reponse']
     list_filter = ['date_envoi']
+
+
+@admin.register(SignalementMessage)
+class SignalementMessageAdmin(admin.ModelAdmin):
+    list_display = ['id', 'message', 'type_probleme', 'signaleur', 'date_signalement', 'admin_traitant']
+    list_filter = ['type_probleme', 'date_signalement']
+    search_fields = ['signaleur__nom', 'signaleur__prenom']

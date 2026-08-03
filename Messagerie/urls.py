@@ -13,4 +13,10 @@ urlpatterns = [
     path('admin/mes-messages/', views.mesMessagesAdmin),            # GET  — historique + réponses (vendeur)
     path('admin/en-attente/',  views.listerMessagesAdminEnAttente), # GET  — messages pas encore pris en charge (admin)
     path('admin/repondre/',    views.repondreMessageAdmin),         # POST — répondre / prendre en charge (admin)
+
+    # ── SIGNALEMENTS DE MESSAGES ─────────────────────────────────────────────
+    path('messages/signaler/',              views.signalerMessage),                 # POST   — signaler un message (participant)
+    path('messages/signalements/en-attente/', views.listerSignalementsMessagesAdmin), # GET  — file des signalements non traités (admin)
+    path('messages/signalements/traiter/',  views.traiterSignalementMessage),        # POST   — marquer comme traité sans supprimer (admin)
+    path('messages/supprimer/',             views.supprimerMessageAdmin),            # DELETE — supprimer le message signalé (admin)
 ]

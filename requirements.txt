@@ -70,12 +70,6 @@ opencv-python-headless==4.10.0.84  # traitement d'image (dépendance de PaddleOC
 # (protobuf<=3.20.2) dans le même environnement (vérifié : import paddle échoue sinon).
 
 
-# ── SCRAPING / AUTOMATISATION NAVIGATEUR ──────────────────────────────────────
-# vérification automatique d'une entreprise sur le registre public du MCI
-# (Registration/services/patente_service.py, étape 05 de soumettre_verification)
-playwright==1.61.0   # après pip install, exécuter : playwright install chromium
-                      # (télécharge le binaire Chromium, non inclus dans le package pip)
-
 
 # ── GÉNÉRATION DE DOCUMENTS (PDF) ──────────────────────────────────────────────
 # contrat vendeur signé électroniquement, généré quand une demande de
