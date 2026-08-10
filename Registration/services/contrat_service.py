@@ -81,7 +81,10 @@ def _construire_contrat_pdf(*, nom_affiche, type_piece_libelle, numero_piece, ph
     elements.append(Paragraph(f"Nom : {nom_affiche}", styles['Normal']))
     elements.append(Paragraph(f"Type de pièce fournie : {type_piece_libelle}", styles['Normal']))
     elements.append(Paragraph(f"Numéro : {numero_piece or '(non renseigné)'}", styles['Normal']))
-    elements.append(Paragraph(f"Date : {timezone.now().strftime('%d/%m/%Y')}", styles['Normal']))
+    # timezone.localtime() : heure d'Haïti (America/Port-au-Prince, voir
+    # TIME_ZONE, BackendRekoltHt/settings/base.py) — timezone.now() seul reste
+    # en UTC (USE_TZ=True), décalé de l'heure locale
+    elements.append(Paragraph(f"Date : {timezone.localtime().strftime('%d/%m/%Y')}", styles['Normal']))
     elements.append(Spacer(1, 1 * cm))
 
     if photo_document is not None and not document_est_pdf:
@@ -94,9 +97,10 @@ def _construire_contrat_pdf(*, nom_affiche, type_piece_libelle, numero_piece, ph
     elements.append(Spacer(1, 1.5 * cm))
 
     # placeholder de signature électronique : aucune signature manuscrite/
-    # cryptographique n'est capturée pour l'instant, seule la date fait foi
+    # cryptographique n'est capturée pour l'instant, seule la date fait foi.
+    # timezone.localtime() : heure d'Haïti, voir commentaire plus haut
     elements.append(Paragraph(
-        f"Signé électroniquement le {timezone.now().strftime('%d/%m/%Y à %Hh%M')}",
+        f"Signé électroniquement le {timezone.localtime().strftime('%d/%m/%Y à %Hh%M')}",
         styles['Normal'],
     ))
 

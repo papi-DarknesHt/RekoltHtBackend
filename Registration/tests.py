@@ -97,7 +97,11 @@ class TestProfilModel(TestCase):
 class TestRegistrationViews(TestCase):
 
     def setUp(self):
-        views.TOKENS.clear()
+        # les tokens sont maintenant des lignes en base (modèle Token, voir
+        # models.py) — TestCase enveloppe déjà chaque test dans une transaction
+        # annulée à la fin, plus besoin de vider un dict en mémoire ici (views.TOKENS
+        # n'existe plus depuis la migration vers le modèle Token en base)
+        pass
 
     def _create_utilisateur(self, email="john.doe@example.com"):
         utilisateur = Utilisateur.objects.create(

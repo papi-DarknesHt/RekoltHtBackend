@@ -3,13 +3,18 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from Registration.models import verifier_droit_admin, enregistrer_audit
 from ..models import Produits, AvisProduit
 from ._auth import _get_user_from_token
 from .produitsViews import _nomVendeur
 
 
-def _serialiseAvis(avis):
-    return {
+def _serialiseAvis(avis, inclure_produit=False):
+    """inclure_produit=True ajoute produit_nom — réservé aux appelants qui ont
+    fait un select_related('produit') (voir listerAvisRecusVendeur ci-dessous,
+    qui en a besoin pour afficher "sur quel produit") : listerAvisProduit,
+    déjà filtré sur un seul produit_id, n'en a pas besoin."""
+    donnees = {
         'id':                avis.id,
         'produit_id':        avis.produit_id,
         'auteur_id':         avis.auteur_id,
@@ -19,6 +24,9 @@ def _serialiseAvis(avis):
         'date_avis':         avis.date_avis.isoformat(),
         'date_modification': avis.date_modification.isoformat(),
     }
+    if inclure_produit:
+        donnees['produit_nom'] = avis.produit.nom
+    return donnees
 
 
 # ── CRÉER OU MODIFIER SON AVIS (acheteur ou vendeur connecté) ─────────────────
@@ -94,12 +102,46 @@ def listerAvisProduit(request):
     }, status=200)
 
 
+# ── AVIS REÇUS SUR MES PRODUITS (vendeur connecté) ────────────────────────────
+@csrf_exempt
+def listerAvisRecusVendeur(request):
+    """
+    Tous les avis laissés sur N'IMPORTE LEQUEL des produits du vendeur
+    connecté, du plus récent au plus ancien — affiché dans son profil (voir
+    ProfilAcheteur.jsx, section "Avis et commentaires" côté vendeur) : chaque
+    entrée précise sur quel produit, quand, et qui l'a écrit (produit_nom/
+    date_avis/auteur_nom, voir _serialiseAvis). Sans objet pour un compte
+    acheteur (aucun produit à soi, retourne juste une liste vide).
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    avis = AvisProduit.objects.filter(produit__vendeur=utilisateur).select_related('auteur', 'produit').order_by('-date_avis')
+
+    return JsonResponse({
+        'avis': [_serialiseAvis(a, inclure_produit=True) for a in avis],
+    }, status=200)
+
+
 # ── SUPPRIMER UN AVIS (auteur connecté, ou admin suite à un signalement) ──────
 @csrf_exempt
 def supprimerAvis(request):
-    """Supprime un avis — son auteur peut toujours supprimer le sien ; un
-    admin peut en plus supprimer l'avis de n'importe qui, typiquement après
-    avoir traité un signalement (voir signalementsViews.py::signalerAvis)."""
+    """
+    Supprime un avis — son auteur peut toujours supprimer le sien (aucune
+    conséquence dans ce cas) ; un admin peut en plus supprimer l'avis de
+    n'importe qui, typiquement après avoir traité un signalement (voir
+    signalementsViews.py::signalerAvis). Dans ce second cas uniquement,
+    l'auteur reçoit un avertissement (Utilisateur.nombre_avertissements,
+    Registration/models.py) via un message automatique de la part de
+    l'admin (réutilise la messagerie existante, identité affichée "Admin",
+    voir Messagerie/views.py::_nomAffiche) — au-delà de SEUIL_AVERTISSEMENTS,
+    le compte est bloqué automatiquement (voir Utilisateur.ajouter_avertissement)
+    et un second message en informe l'auteur.
+    """
     if request.method != 'DELETE':
         return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
 
@@ -115,14 +157,68 @@ def supprimerAvis(request):
     if 'id' not in data:
         return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
 
+    # un admin sans le droit gestion_signalements est traité comme un
+    # utilisateur normal : il ne peut supprimer que son propre avis
+    peut_moderer = verifier_droit_admin(utilisateur, 'gestion_signalements')
     try:
-        if utilisateur.profil.role == 'admin':
-            avis = AvisProduit.objects.get(id=data['id'])
+        if peut_moderer:
+            avis = AvisProduit.objects.select_related('auteur', 'produit').get(id=data['id'])
         else:
             avis = AvisProduit.objects.get(id=data['id'], auteur=utilisateur)
     except AvisProduit.DoesNotExist:
         return JsonResponse({'error': 'Avis introuvable', 'error_code': 'REVIEW_NOT_FOUND'}, status=404)
 
+    auteur = avis.auteur
+    nom_produit = avis.produit.nom
+    id_avis = avis.id
+
+    # raison obligatoire seulement quand un admin modère l'avis de QUELQU'UN
+    # D'AUTRE (une décision à notifier) — pas quand l'auteur supprime le sien
+    est_decision_moderation = peut_moderer and auteur is not None and auteur.id != utilisateur.id
+    raison = (data.get('raison') or '').strip()
+    if est_decision_moderation and not raison:
+        return JsonResponse({'error': 'Le champ raison est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'raison'}}, status=400)
+
     avis.delete()
+
+    # avertissement uniquement quand un admin supprime l'avis de QUELQU'UN
+    # D'AUTRE (jamais quand l'auteur supprime le sien lui-même, et jamais si
+    # le compte auteur a depuis été supprimé — avis.auteur alors déjà None)
+    if est_decision_moderation:
+        enregistrer_audit(utilisateur, 'avis.supprimer', f"A supprimé l'avis de {auteur.prenom} {auteur.nom} sur « {nom_produit} » (avis id {id_avis}) — Raison : {raison}")
+        from Messagerie.models import Conversation, Message   # import différé : évite un cycle Produits <-> Messagerie
+        from Registration.models import SEUIL_AVERTISSEMENTS
+        from Registration.services.notification_service import envoyer_email_decision, pied_de_page
+
+        a_ete_bloque = auteur.ajouter_avertissement()
+
+        conversation = Conversation.obtenir_ou_creer(utilisateur, auteur)
+        Message.objects.create(
+            conversation=conversation, expediteur=utilisateur,
+            contenu=(
+                f"Votre avis sur le produit « {nom_produit} » a été supprimé par un administrateur "
+                f"suite à un signalement. Ceci est un avertissement ({auteur.nombre_avertissements}/{SEUIL_AVERTISSEMENTS})."
+            ),
+        )
+        envoyer_email_decision(
+            auteur, f"Votre avis sur « {nom_produit} » a été supprimé — RekoltHt",
+            f"Bonjour {auteur.prenom},\n\n"
+            f"Suite à la décision suivante de l'administration, votre avis sur le produit « {nom_produit} » "
+            f"a été supprimé :\n\n{raison}\n\n"
+            f"Ceci est un avertissement ({auteur.nombre_avertissements}/{SEUIL_AVERTISSEMENTS}).\n{pied_de_page()}",
+        )
+        if a_ete_bloque:
+            Message.objects.create(
+                conversation=conversation, expediteur=utilisateur,
+                contenu=(
+                    "Votre compte a été bloqué automatiquement après 10 avertissements. "
+                    "Contactez un administrateur si vous pensez qu'il s'agit d'une erreur."
+                ),
+            )
+            envoyer_email_decision(
+                auteur, 'Votre compte a été bloqué — RekoltHt',
+                f"Bonjour {auteur.prenom},\n\nVotre compte RekoltHt a été bloqué automatiquement après "
+                f"{SEUIL_AVERTISSEMENTS} avertissements (avis supprimés suite à des signalements).\n{pied_de_page()}",
+            )
 
     return JsonResponse({'message': 'Avis supprimé avec succès'}, status=200)

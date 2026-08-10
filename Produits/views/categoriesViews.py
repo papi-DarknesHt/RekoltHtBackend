@@ -3,6 +3,7 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from Registration.models import verifier_droit_admin, enregistrer_audit
 from ..models import Categories
 from ._auth import _get_user_from_token
 
@@ -40,8 +41,8 @@ def creerCategorie(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
-    if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
 
     try:
         data = json.loads(request.body)
@@ -55,6 +56,7 @@ def creerCategorie(request):
         nom         = data['nom'],
         description = data.get('description', ''),
     )
+    enregistrer_audit(utilisateur, 'categorie.creer', f"A créé la catégorie « {categorie.nom} » (id {categorie.id})")
 
     return JsonResponse({
         'message':   'Catégorie créée avec succès',
@@ -73,8 +75,8 @@ def modifierCategorie(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
-    if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
 
     try:
         data = json.loads(request.body)
@@ -93,6 +95,7 @@ def modifierCategorie(request):
         if champ in data:
             setattr(categorie, champ, data[champ])
     categorie.save()
+    enregistrer_audit(utilisateur, 'categorie.modifier', f"A modifié la catégorie « {categorie.nom} » (id {categorie.id})")
 
     return JsonResponse({
         'message':   'Catégorie mise à jour avec succès',
@@ -111,8 +114,8 @@ def supprimerCategorie(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
 
-    if utilisateur.profil.role != 'admin':
-        return JsonResponse({'error': "Accès réservé aux administrateurs", 'error_code': 'ADMIN_ONLY'}, status=403)
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
 
     try:
         data = json.loads(request.body)
@@ -127,7 +130,9 @@ def supprimerCategorie(request):
     except Categories.DoesNotExist:
         return JsonResponse({'error': 'Catégorie introuvable', 'error_code': 'CATEGORY_NOT_FOUND'}, status=404)
 
+    nom_categorie = categorie.nom
     categorie.delete()
+    enregistrer_audit(utilisateur, 'categorie.supprimer', f"A supprimé la catégorie « {nom_categorie} »")
 
     return JsonResponse({'message': 'Catégorie supprimée avec succès'}, status=200)
 

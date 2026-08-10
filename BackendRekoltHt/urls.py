@@ -33,6 +33,11 @@ urlpatterns = [
     # Ex: /messagerie/conversations/, /messagerie/messages/envoyer/…
     path('messagerie/', include('Messagerie.urls')),
 
+    # ── SAUVEGARDES ────────────────────────────────────────────────────────────
+    # Routes définies dans Sauvegarde/urls.py
+    # Ex: /Sauvegarde/configuration/, /Sauvegarde/declencher/…
+    path('Sauvegarde/', include('Sauvegarde.urls')),
+
 ]
 
 # ── FICHIERS MÉDIAS EN DÉVELOPPEMENT ──────────────────────────────────────────

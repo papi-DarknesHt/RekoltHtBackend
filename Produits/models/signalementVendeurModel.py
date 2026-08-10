@@ -38,6 +38,21 @@ class SignalementVendeur(models.Model):
         Utilisateur, on_delete=models.SET_NULL, null=True, blank=True, related_name='signalements_vendeurs_traites'
     )
     date_traitement = models.DateTimeField(null=True, blank=True)
+    # True pour tous les signalements PRÉCÉDENTS (même vendeur + même motif)
+    # dès que le seuil déclenche la suspension automatique (voir signalerVendeur,
+    # Produits/views/signalementsViews.py) — exclu de la file d'attente admin
+    # (listerSignalementsVendeursAdmin) pour que seul le signalement déclencheur
+    # reste visible, comme entrée explicative unique plutôt que N doublons
+    resolu_automatiquement = models.BooleanField(default=False)
+
+    # "supprimer" une entrée de l'historique masque seulement pour l'admin qui
+    # a cliqué — voir SignalementProduit.historique_masque_pour, même principe
+    historique_masque_pour = models.ManyToManyField(
+        Utilisateur, related_name='signalements_vendeurs_historique_masques', blank=True
+    )
+
+    # justification saisie par l'admin_traitant — voir SignalementProduit.explication_decision
+    explication_decision = models.TextField(blank=True, default='')
 
     class Meta:
         db_table = "signalements_vendeurs"

@@ -19,27 +19,38 @@ from .produitsViews import (
     listerVendeursCarte,
     historiqueContactsVendeur,
     reactiverProduitAdmin,
+    desactiverProduitAdmin,
+    supprimerProduitAdmin,
     statistiquesVendeurPdf,
 )
 from .photoProduits import (
     ajouterPhotosProduit,
     listerPhotosProduit,
+    reordonnerPhotosProduit,
     supprimerPhotoProduit,
 )
 from .signalementsViews import (
     signalerProduit,
     listerSignalementsAdmin,
+    listerSignalementsTraites,
+    supprimerHistoriqueSignalements,
     traiterSignalement,
     signalerVendeur,
     listerSignalementsVendeursAdmin,
+    listerSignalementsVendeursTraites,
+    supprimerHistoriqueSignalementsVendeurs,
     traiterSignalementVendeur,
     signalerAvis,
     listerSignalementsAvisAdmin,
+    listerSignalementsAvisTraites,
+    supprimerHistoriqueSignalementsAvis,
     traiterSignalementAvis,
+    genererRapportSignalements,
 )
 from .avisViews import (
     creerModifierAvis,
     listerAvisProduit,
+    listerAvisRecusVendeur,
     supprimerAvis,
 )
 from .sousCategoriesViews import (
@@ -47,4 +58,8 @@ from .sousCategoriesViews import (
     creerSousCategorie,
     modifierSousCategorie,
     supprimerSousCategorie,
+)
+from .vuesViews import (
+    statistiquesVuesVendeur,
+    statistiquesVuesAdmin,
 )

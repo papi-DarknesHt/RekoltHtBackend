@@ -7,3 +7,4 @@ from .signalementModel import SignalementProduit
 from .signalementVendeurModel import SignalementVendeur
 from .avisModel import AvisProduit
 from .signalementAvisModel import SignalementAvis
+from .vueProduitModel import VueProduit

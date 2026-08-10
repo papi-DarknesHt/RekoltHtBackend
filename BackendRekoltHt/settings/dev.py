@@ -25,6 +25,14 @@ from .base import *  # noqa: F401,F403 — réglages communs (INSTALLED_APPS, MI
 DEBUG = True
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1','192.168.1.4']
+
+# adresse publique du backend lui-même — sert UNIQUEMENT à construire une URL
+# absolue de média (photo produit, ...) hors d'une requête HTTP (diffusion
+# WebSocket depuis un signal, voir Messagerie/views.py::_url_absolue_media) :
+# request.build_absolute_uri() n'existe que dans une vue. Redéfinissable via
+# la variable d'environnement du même nom si le backend est testé depuis un
+# autre appareil du réseau local (voir ALLOWED_HOSTS ci-dessus, ex. 192.168.1.4)
+BACKEND_BASE_URL = os.getenv('BACKEND_BASE_URL', 'http://127.0.0.1:8000')
 # autoriser la communication entre react et django
 CORS_ALLOWED_ORIGINS = ["http://localhost:5173","https://rekolthtfront.onrender.com",'http://192.168.1.4:5173']
 CORS_ALLOW_CREDENTIALS = True

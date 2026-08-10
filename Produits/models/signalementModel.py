@@ -36,6 +36,27 @@ class SignalementProduit(models.Model):
         Utilisateur, on_delete=models.SET_NULL, null=True, blank=True, related_name='signalements_traites'
     )
     date_traitement = models.DateTimeField(null=True, blank=True)
+    # True pour tous les signalements PRÉCÉDENTS d'un produit dès que le 5e
+    # déclenche la désactivation automatique (voir signalerProduit,
+    # Produits/views/signalementsViews.py) — exclu de la file d'attente admin
+    # (listerSignalementsAdmin) pour que seul le signalement déclencheur reste
+    # visible, comme entrée explicative unique plutôt que 5 doublons
+    resolu_automatiquement = models.BooleanField(default=False)
+
+    # "supprimer" une entrée de l'historique (listerSignalementsTraites,
+    # Produits/views/signalementsViews.py) masque seulement pour l'admin qui a
+    # cliqué — jamais un vrai delete() : chaque admin a son propre historique
+    # (demande explicite), un autre admin (y compris "Tous les droits")
+    # continue de le voir normalement. Même principe que
+    # Messagerie/models.py::MessageSupport.historique_masque_pour.
+    historique_masque_pour = models.ManyToManyField(
+        Utilisateur, related_name='signalements_produits_historique_masques', blank=True
+    )
+
+    # justification saisie par l'admin_traitant au moment de traiterSignalement
+    # (Produits/views/signalementsViews.py) — obligatoire côté frontend, restituée
+    # dans l'historique et le rapport PDF d'audit (genererRapportSignalements)
+    explication_decision = models.TextField(blank=True, default='')
 
     class Meta:
         db_table = "signalements_produits"

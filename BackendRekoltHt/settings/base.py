@@ -47,11 +47,17 @@ INSTALLED_APPS = [
     'Produits',
     'Registration',
     'Messagerie',
+    'Sauvegarde',
     'social_django',
 ]
 # ne pas toucher
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
+    # convertit un ValueError/TypeError non intercepté (ex: id non numérique
+    # dans une query string) en réponse JSON 400 propre plutôt qu'une 500
+    # générique — voir Api/middleware.py pour le constat détaillé (audit de
+    # sécurité, pas une injection SQL : l'ORM refuse déjà la conversion)
+    "Api.middleware.ExceptionJsonMiddleware",
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -159,7 +165,14 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+# Fuseau horaire d'Haïti (UTC-5, EST — Haïti observe aussi l'heure d'été,
+# 'America/Port-au-Prince' gère cette règle automatiquement contrairement à un
+# simple décalage fixe) : la plateforme n'a d'utilisateurs qu'en Haïti, tous
+# les horodatages affichés (timezone.localtime/localdate — rapports PDF,
+# dates "aujourd'hui" des sélecteurs de période, etc.) doivent refléter
+# l'heure locale d'Haïti, pas UTC. Les données restent stockées en UTC en
+# base (USE_TZ=True ci-dessous) — seul l'AFFICHAGE change.
+TIME_ZONE = 'America/Port-au-Prince'
 
 USE_I18N = True
 
@@ -184,6 +197,86 @@ EMAIL_USE_TLS       = os.getenv('EMAIL_USE_TLS') == 'True'
 EMAIL_HOST_USER     = os.getenv('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL  = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
+
+# ── reCAPTCHA ──────────────────────────────────────────────────────────────────
+# clé secrète de vérification côté serveur (voir Registration/views.py::
+# _verifier_recaptcha, utilisée par creerAdmin) — distincte de la clé de site
+# publique VITE_RECAPTCHA_KEY côté frontend. Si absente, la vérification est
+# ignorée (dev sans clé) plutôt que de bloquer toute création de compte admin.
+RECAPTCHA_SECRET_KEY = os.getenv('RECAPTCHA_SECRET_KEY')
+
+
+# ── SAUVEGARDES (voir Sauvegarde/) ────────────────────────────────────────────
+# clé maître de chiffrement des fichiers .rhtbackup (Fernet, voir
+# Sauvegarde/services/chiffrement_service.py) — dédiée, indépendante de
+# SECRET_KEY et de tout mot de passe utilisateur, pour qu'un backup reste
+# restaurable même si les comptes admin changent. Générée une fois via
+# Fernet.generate_key() et collée dans .env/.env.dev, jamais en base.
+BACKUP_MASTER_KEY = os.getenv('BACKUP_MASTER_KEY')
+
+# ── MESSAGERIE SUPPORT (voir Messagerie/) ─────────────────────────────────────
+# clé maître de chiffrement des messages "vendeur/acheteur -> administrateurs"
+# (Fernet, voir Messagerie/services/support_chiffrement_service.py). Choix
+# assumé (demandé explicitement par le propriétaire) : contrairement à la
+# messagerie privée 1:1 (chiffrement de bout en bout, jamais lisible par le
+# serveur), les messages support sont chiffrés UNIQUEMENT contre un accès
+# base de données brut — le serveur applicatif, lui, peut toujours les
+# déchiffrer. Contrepartie acceptée en échange d'un vrai bénéfice : un admin
+# auquel le droit gestion_support est accordé APRÈS l'envoi d'un message peut
+# quand même le lire et y répondre immédiatement, sans dépendre d'un autre
+# admin encore en ligne pour "réparer" une enveloppe de clé E2E manquante
+# (impossible par nature avec le chiffrement de bout en bout — voir l'ancien
+# schéma, toujours conservé en lecture seule pour les messages antérieurs à
+# ce changement, voir MessageSupport.format_chiffrement).
+SUPPORT_MASTER_KEY = os.getenv('SUPPORT_MASTER_KEY')
+
+# ── MESSAGERIE PRIVÉE 1:1 (voir Messagerie/) ──────────────────────────────────
+# clé maître de chiffrement des messages privés entre deux utilisateurs
+# (Fernet, voir Messagerie/services/messages_chiffrement_service.py). Jusqu'ici
+# cette messagerie était chiffrée de BOUT EN BOUT (clé gérée par le
+# navigateur de chaque utilisateur, jamais lisible par le serveur) — décision
+# explicitement inversée par le propriétaire : demande que les messages
+# restent accessibles immédiatement sur n'importe quel appareil/navigateur dès
+# la connexion, sans jamais redemander de mot de passe ni de clé côté client.
+# Même compromis, déjà en place pour la messagerie support (voir
+# SUPPORT_MASTER_KEY ci-dessus) : chiffré contre un accès base de données brut,
+# mais le serveur applicatif peut toujours le déchiffrer pour un participant
+# authentifié de la conversation.
+MESSAGES_MASTER_KEY = os.getenv('MESSAGES_MASTER_KEY')
+
+# dossier de stockage des sauvegardes "locales" — même avertissement que
+# MEDIA_ROOT ci-dessous : sur un hébergeur au système de fichiers éphémère
+# (ex. Render), ce dossier ne survit pas à un redéploiement ; la destination
+# "locale" n'est fiable qu'en auto-hébergement ou en développement, sinon
+# préférer la destination "google_drive"
+SAUVEGARDE_ROOT = BASE_DIR / 'sauvegardes'
+
+# identifiants OAuth2 dédiés à l'upload Google Drive (scope drive.file
+# uniquement — l'app ne voit que les fichiers qu'elle crée elle-même), voir
+# Sauvegarde/services/google_drive_service.py. Distincts de
+# SOCIAL_AUTH_GOOGLE_OAUTH2_KEY/SECRET (connexion des utilisateurs) même s'ils
+# peuvent techniquement provenir du même projet Google Cloud.
+GOOGLE_DRIVE_CLIENT_ID     = os.getenv('GOOGLE_DRIVE_CLIENT_ID')
+GOOGLE_DRIVE_CLIENT_SECRET = os.getenv('GOOGLE_DRIVE_CLIENT_SECRET')
+GOOGLE_DRIVE_REDIRECT_URI  = os.getenv('GOOGLE_DRIVE_REDIRECT_URI')
+# URL du frontend vers laquelle rediriger une fois le consentement Google
+# Drive terminé (voir Sauvegarde/views.py::google_callback)
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+
+
+# ── ASSISTANT IA DU CHATBOT (voir Messagerie/services/chatbot_ia_service.py) ──
+# clé API OpenRouter (passerelle unique vers de nombreux modèles — GPT, Claude,
+# etc., voir CHATBOT_IA_MODEL ci-dessous) — obtenue sur https://openrouter.ai.
+# Laisser vide désactive l'assistant IA : ChatbotVendeur.jsx dégrade alors
+# proprement vers la proposition de contacter un administrateur (même
+# convention que RECAPTCHA_SECRET_KEY/FACE_VENV_PYTHON ci-dessus/ci-dessous —
+# une clé optionnelle absente désactive la fonctionnalité, ne casse rien).
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+# modèle utilisé, au format OpenRouter "fournisseur/modele" (ex. "openai/gpt-4o",
+# "openai/gpt-4o-mini", "anthropic/claude-haiku-4.5"...) — changeable sans
+# redéploiement de code, voir https://openrouter.ai/models pour la liste et les
+# tarifs de chacun
+CHATBOT_IA_MODEL = os.getenv('CHATBOT_IA_MODEL', 'openai/gpt-4o')
 
 
 # ── VÉRIFICATION FACIALE (DeepFace, environnement Python dédié) ──────────────

@@ -42,21 +42,67 @@ _MOIS_ABREGES = {
 # d'où la recherche par position (coordonnées des boîtes) plutôt que par
 # simple ordre séquentiel du texte.
 _LABELS_NOM    = {'NOM', 'SIYATI'}
+# "SIYATI" seul (sans "NOM") : plus fiable comme ancre PRIORITAIRE que le
+# jeu complet ci-dessus — voir son usage dans extraire_infos_piece. "NOM" est
+# un token de 3 lettres qui se cache dans une foule d'autres mots (à
+# commencer par "PRÉNOM" lui-même), alors qu'aucun mot français/créole
+# courant sur ces pièces ne contient "SIYATI" par accident.
+_LABELS_NOM_PRIORITAIRE = {'SIYATI'}
 _LABELS_PRENOM = {'PRENOM', 'NON'}
 # "SIYATI" (créole) désigne à la fois le libellé du nom ("Siyati/Nom") ET la
 # ligne de signature plus bas sur le passeport ("Siyati [...] a / Signature du
 # titulaire") — sans cette exclusion, la ligne de signature est retenue comme
 # valeur du nom, car elle a du texte fusionné dans la même boîte qui gagne la
 # recherche avant même d'essayer la vraie boîte "Siyati/Nom" (priorité 1 de
-# _chercher_valeur_liee) — constaté en conditions réelles
-_LABELS_EXCLUS_NOM = {'SIGNATURE', 'TITULAIRE'}
+# _chercher_valeur_liee) — constaté en conditions réelles.
+# "PRENOM" contient littéralement le token "NOM" ("PRE-NOM") : sans cette
+# exclusion, la boîte libellée "Prénom/Non" (ex: sur la CIN) est elle-même
+# retenue comme candidate pour la recherche du NOM, et comme sur la CIN ce
+# libellé précède le vrai "Nom/Siyati" dans l'ordre de détection, sa boîte
+# voisine (la vraie valeur du PRÉNOM) est renvoyée à tort comme valeur du NOM
+# — constaté en conditions réelles, systématique sur toute CIN (l'ordre des
+# champs y est inversé par rapport au passeport). Grâce à la tolérance OCR de
+# _label_present, cette exclusion matche aussi les variantes mal lues de
+# "PRENOM" (ex: "PRANOM") sans qu'il soit besoin de les répertorier ici.
+# Filet de sécurité en plus de _LABELS_NOM_PRIORITAIRE, pas un remplacement :
+# celui-ci ne protège que la recherche de repli sur le jeu complet _LABELS_NOM
+# (voir extraire_infos_piece), utilisée seulement quand "SIYATI" est
+# introuvable (même approximativement).
+_LABELS_EXCLUS_NOM = {'SIGNATURE', 'TITULAIRE', 'PRENOM'}
 _LABELS_NUMERO_PAR_TYPE = {
-    'passeport': {'PASSEPORT'},                    # "Paspò nimewo / N° Passeport"
-    'cin':       {'CARTE', 'KAT'},                  # "Numéro de carte / Nimewo kat la"
+    # le titre bilingue du document ("PASPÒ" / "PASSEPORT") est imprimé sur
+    # deux lignes séparées, et selon la photo, le numéro de passeport peut se
+    # trouver géométriquement plus proche de l'une ou l'autre ligne (parfois
+    # même AU-DESSUS de la ligne "PASSEPORT", ce qui l'exclut de sa recherche
+    # de voisin — voir la restriction "jamais au-dessus" dans
+    # _chercher_valeur_liee) — inclure les deux comme ancres possibles permet
+    # de retomber sur celle qui a effectivement le numéro comme voisin
+    # valide, constaté en conditions réelles.
+    'passeport': {'PASSEPORT', 'PASPO'},           # "Paspò nimewo / N° Passeport"
+    # bare "CARTE"/"KAT" (créole, "carte") matchent aussi le TITRE du document
+    # ("CARTE D'IDENTIFICATION NATIONALE", "KAT IDANTIFIKASYON NASYONAL"), la
+    # ligne de signature ("Siyati mèt KAT la") et les libellés de date
+    # d'émission/expiration ("Dat KAT la fèt/fini", littéralement "date de la
+    # carte faite/finie") — toutes ces boîtes concurrencent alors la vraie
+    # boîte de libellé et la recherche de voisin peut renvoyer un fragment de
+    # l'une d'elles au lieu du vrai numéro de carte — constaté en conditions
+    # réelles. Les paires "DE CARTE"/"NIMEWO KAT" ne désignent, elles,
+    # jamais que le vrai champ numéro de carte sur cette pièce.
+    # "Nimewo kat" seul capturerait aussi le "la" qui suit (article défini
+    # créole, "LE numéro de carte" — pas un fragment de la valeur) : la
+    # recherche de valeur fusionnée dans la même boîte (_valeur_dans_meme_boite)
+    # coupe alors juste après "kat", et le reste de la boîte (" la") est pris
+    # à tort pour la valeur — constaté en conditions réelles. Inclure "la"
+    # dans le libellé lui-même règle ce cas.
+    'cin':       {'DE CARTE', 'NIMEWO KAT LA'},     # "Numéro de carte / Nimewo kat la"
     'permis':    {'NIF'},                           # identifiant retenu pour le permis (voir consigne produit)
 }
 _LABELS_NUMERO_PATENTE = {'PATENTE'}                # "Numéro de Patente"
 _LABELS_ENTREPRISE     = {'DELIVREA', 'DELIVRE'}    # "Délivré à" (nom de l'entreprise sur le certificat)
+_LABELS_NAISSANCE = {'NAISSANCE'}                   # "Date de naissance / Dat li fèt"
+# "Lieu de naissance / Kote li fèt" contient lui aussi le mot "naissance",
+# mais désigne le LIEU, pas la date — voir _chercher_date_naissance.
+_LABELS_EXCLUS_NAISSANCE = {'LIEU', 'KOTE'}
 
 
 def _obtenir_ocr():
@@ -78,6 +124,82 @@ def _normalise(texte):
     return _sans_accents(texte).upper()
 
 
+def _distance_levenshtein(a, b):
+    """
+    Distance de Levenshtein (nombre minimal de substitutions/insertions/
+    suppressions d'un caractère pour passer de `a` à `b`) — implémentation
+    naïve en Python pur, largement suffisante ici : les chaînes comparées
+    sont toujours très courtes (un libellé de pièce d'identité, quelques
+    caractères).
+    """
+    if a == b:
+        return 0
+    m, n = len(a), len(b)
+    if m == 0:
+        return n
+    if n == 0:
+        return m
+    precedente = list(range(n + 1))
+    for i in range(1, m + 1):
+        courante = [i] + [0] * n
+        for j in range(1, n + 1):
+            cout = 0 if a[i - 1] == b[j - 1] else 1
+            courante[j] = min(
+                precedente[j] + 1,          # suppression
+                courante[j - 1] + 1,        # insertion
+                precedente[j - 1] + cout,   # substitution
+            )
+        precedente = courante
+    return precedente[n]
+
+
+def _tolerance_ocr(label):
+    """
+    Nombre d'erreurs OCR tolérées (une lettre substituée, ajoutée ou
+    manquante) pour reconnaître ce libellé — 1 pour les libellés de 6
+    caractères ou plus, 0 (correspondance exacte) en dessous.
+
+    PaddleOCR corrompt parfois un libellé d'une seule lettre — constaté en
+    conditions réelles sous deux formes différentes : substitution d'une
+    lettre visuellement proche ("Prénom"→"Pranom", "Non"→"Nan" : é/o→a) et
+    suppression pure et simple d'une lettre ("Siyati"→"Siyat",
+    "Naissance"→"Nassance"). Une tolérance de 1 sur la distance de
+    Levenshtein couvre les deux cas de façon générale, plutôt que de
+    répertorier au cas par cas chaque variante déjà observée — au risque de
+    rater la prochaine.
+
+    Réservée aux libellés d'UN SEUL mot d'au moins 6 caractères. En dessous
+    de 6 (ex: "NOM", "NON", "NIF", "LIEU", "KOTE"), une seule lettre de
+    différence peut transformer le mot en un autre mot plausible du texte
+    environnant et provoquer un faux positif — constaté en conditions
+    réelles ("Nan", préposition créole courante ["dans/à", ex: "nan biwo
+    ONI"], à une lettre de "Non" et présente dans le texte légal au dos
+    d'une CIN). Pour un libellé à PLUSIEURS mots (ex: "DE CARTE"), la
+    fenêtre glissante de _sous_chaine_floue ignore les frontières de mots :
+    un seul caractère de différence peut alors faire glisser la fenêtre sur
+    une phrase sans rapport ("...trouvé cet**te carte** est prié..." matche
+    "DE CARTE" à distance 1 : "TE CARTE") — constaté en conditions réelles,
+    d'où l'exclusion des libellés à espace(s) de la tolérance.
+    """
+    return 1 if len(label) >= 6 and ' ' not in label else 0
+
+
+def _sous_chaine_floue(texte, label, tolerance):
+    """Vrai si `label` apparaît dans `texte` en sous-chaîne EXACTE, ou (si
+    `tolerance` > 0) à une distance de Levenshtein <= `tolerance` d'une
+    fenêtre de taille proche à une position quelconque de `texte`."""
+    if label in texte:
+        return True
+    if tolerance == 0:
+        return False
+    n = len(label)
+    for taille in range(max(1, n - tolerance), n + tolerance + 1):
+        for i in range(0, len(texte) - taille + 1):
+            if _distance_levenshtein(texte[i:i + taille], label) <= tolerance:
+                return True
+    return False
+
+
 def _label_present(texte, labels):
     """
     Vrai si un des libellés apparaît en SOUS-CHAÎNE du texte normalisé —
@@ -88,9 +210,13 @@ def _label_present(texte, labels):
     deux cas constatés sur de vraies pièces. Une correspondance de sous-
     chaîne retrouve "NOM"/"SIYATI"/"PRENOM" dans ces deux cas sans effort
     supplémentaire.
+
+    Tolère aussi jusqu'à une erreur OCR sur le libellé lui-même, pour les
+    libellés assez longs pour que ce soit sûr — voir _tolerance_ocr et
+    _sous_chaine_floue.
     """
     normalise = _normalise(texte)
-    return any(label in normalise for label in labels)
+    return any(_sous_chaine_floue(normalise, label, _tolerance_ocr(label)) for label in labels)
 
 
 def _est_un_label(ligne):
@@ -165,6 +291,29 @@ def _ressemble_a_un_numero(texte):
     return bool(_RE_NUMERO.search(texte.upper())) and any(c.isdigit() for c in texte)
 
 
+_RE_NUMERO_PASSEPORT = re.compile(r'^[A-Z][A-Z0-9]{5,15}$')
+
+
+def _ressemble_a_un_numero_passeport(texte):
+    """
+    Vrai si le texte a la forme d'un numéro de passeport haïtien : une lettre
+    suivie de chiffres, sans tiret (ex: "R12186923") — PAS un NIF, qui lui est
+    purement numérique, parfois avec tirets (ex: "0085147906", "008-512-877-0").
+
+    Le seul libellé disponible pour ancrer la recherche du numéro de passeport
+    est le mot "PASSEPORT", qui désigne à la fois le TITRE du document
+    ("PASPÒ/PASSEPORT" à gauche de la page) et le vrai libellé du champ
+    ("Paspò nimewo/N° Passeport" en haut) — sur une photo où ce dernier est
+    mal reconnu par l'OCR (glissé/tronqué), seule la boîte-titre reste
+    candidate, et sa boîte voisine géométrique la plus proche peut être le NIF
+    plutôt que le vrai numéro de passeport — constaté en conditions réelles.
+    Ce filtre, plus strict que _ressemble_a_un_numero (qui accepte aussi bien
+    le NIF), départage les deux quelle que soit la boîte-ancre retenue.
+    """
+    valeur = texte.strip().upper()
+    return bool(_RE_NUMERO_PASSEPORT.match(valeur)) and any(c.isdigit() for c in valeur)
+
+
 def _chercher_valeur_liee(detections, labels, exclure=None, filtre=None):
     """
     Cherche une détection dont le texte contient un des tokens de `labels`,
@@ -178,11 +327,27 @@ def _chercher_valeur_liee(detections, labels, exclure=None, filtre=None):
     boîte "SIYATI" qui est en réalité la ligne de signature, pas le nom —
     voir _LABELS_EXCLUS_NOM).
 
-    `filtre` : si fourni, la recherche par position (priorité 2) préfère,
-    parmi les boîtes voisines candidates, la première qui satisfait ce
-    prédicat plutôt que la plus proche géométriquement (voir
-    _ressemble_a_un_numero) ; si aucune ne le satisfait, on retombe sur la
-    plus proche comme avant.
+    `filtre` : si fourni, s'applique à la fois à la valeur fusionnée dans la
+    même boîte (priorité 1) et à la recherche par position (priorité 2), qui
+    préfère parmi les boîtes voisines candidates la première qui le satisfait
+    plutôt que la plus proche géométriquement (voir _ressemble_a_un_numero).
+
+    Sans ce filtre en priorité 1, un libellé court comme "PASPO" peut aussi
+    matcher un fragment sans rapport à l'intérieur d'une boîte d'en-tête plus
+    longue (ex: "...Paspo nimewo/NPassepor", tronquée par l'OCR) et en
+    renvoyer le reste comme si c'était la valeur, avant même d'essayer la
+    vraie boîte-titre courte — constaté en conditions réelles.
+
+    En priorité 2, si la boîte-libellé retenue n'a AUCUN voisin satisfaisant
+    le filtre, les autres boîtes-libellé candidates sont essayées avant
+    d'abandonner — ex: sur un passeport, le titre bilingue "PASPÒ/PASSEPORT"
+    tient sur deux boîtes, et selon la photo le numéro de passeport peut être
+    un voisin valide de l'une sans l'être de l'autre (la même règle
+    géométrique "jamais au-dessus" qui sert à écarter le NIF ailleurs peut
+    aussi exclure le vrai numéro pour la première boîte-titre essayée) ; ne
+    retomber sur la plus proche géométrique sans filtre qu'en tout dernier
+    recours, une fois toutes les boîtes-libellé épuisées — constaté en
+    conditions réelles.
 
     Priorité 1 sur TOUTES les boîtes portant le libellé (pas seulement la
     première) : si l'une contient la valeur fusionnée dans le même texte, on
@@ -198,14 +363,27 @@ def _chercher_valeur_liee(detections, labels, exclure=None, filtre=None):
         if _label_present(d['texte'], labels)
         and not (exclure and _label_present(d['texte'], exclure))
     ]
+    # le libellé "riche" (ex: la ligne d'en-tête complète "Kalite/Type Peyi ki
+    # fè l/Pays émetteur Paspo nimewo/N° Passeport") porte plus de contexte
+    # que le simple titre du document répétant le même mot (ex: la boîte
+    # "PASSEPORT" du titre "PASPÒ/PASSEPORT") ; sur certains documents,
+    # l'ordre de détection place le titre AVANT le vrai libellé, et comme la
+    # recherche s'arrête à la première boîte candidate ayant un voisin
+    # exploitable, le titre gagnait à tort et sa boîte voisine géométrique
+    # (parfois un champ sans rapport, ex: le NIF) était renvoyée comme valeur
+    # — constaté en conditions réelles sur un passeport. Essayer d'abord la
+    # boîte la plus riche en texte règle ce cas sans dépendre de l'ordre de
+    # détection.
+    candidats.sort(key=lambda d: len(d['texte']), reverse=True)
 
     for detection in candidats:
         meme_boite = _valeur_dans_meme_boite(detection['texte'], labels)
-        if meme_boite and not _est_un_label(meme_boite):
+        if meme_boite and not _est_un_label(meme_boite) and (not filtre or filtre(meme_boite)):
             return meme_boite.strip(" :.-")
 
     # priorité 2 : repli sur la boîte voisine la plus proche du premier
     # libellé trouvé (mise en page en tableau/ligne)
+    repli = None
     for detection in candidats:
         lx, ly = detection['cx'], detection['cy']
         proches = []
@@ -222,12 +400,14 @@ def _chercher_valeur_liee(detections, labels, exclure=None, filtre=None):
         if not proches:
             continue
         proches.sort(key=lambda p: p[0])
-        if filtre:
-            correspond = next((texte for _, texte in proches if filtre(texte)), None)
-            if correspond:
-                return correspond.strip(" :.-")
-        return proches[0][1].strip(" :.-")
-    return None
+        if not filtre:
+            return proches[0][1].strip(" :.-")
+        correspond = next((texte for _, texte in proches if filtre(texte)), None)
+        if correspond:
+            return correspond.strip(" :.-")
+        if repli is None:
+            repli = proches[0][1]
+    return repli.strip(" :.-") if repli else None
 
 
 def _mois_depuis_texte(texte):
@@ -250,30 +430,88 @@ def _annee_sur_quatre_chiffres(annee_deux_chiffres):
     return 2000 + annee if annee <= 30 else 1900 + annee
 
 
-def _chercher_date_naissance(lignes):
+def _date_valide(jour, mois, annee):
     """
-    Retourne la première date trouvée, au format JJ/MM/AAAA.
+    Vrai si (jour, mois, année) forme une date calendaire réelle — sert à
+    écarter les faux positifs de _RE_DATE : un motif JJ-MM-AAAA peut matcher
+    par coïncidence un nombre sans rapport ailleurs sur la pièce (ex: le
+    "Numéro d'identification nationale" imprimé sur la page opposée d'un
+    passeport, visible en transparence sur la photo — "13-38-06-6598" contient
+    "38-06-6598", qui matche le motif JJ-MM-AAAA alors que 38 n'est pas un
+    jour valide) — constaté en conditions réelles.
+    """
+    try:
+        date(annee, mois, jour)
+        return True
+    except ValueError:
+        return False
 
-    Essaie d'abord le format numérique standard (JJ/MM/AAAA, voir _RE_DATE),
-    puis, si aucune ligne ne correspond, le format bilingue créole/français
-    des passeports haïtiens : jour + nom(s) de mois abrégé(s) + année sur 2
-    chiffres, souvent collés sans espace par l'OCR (ex: "01Me/Mai02" pour le
-    01/05/2002 — voir _RE_DATE_MOIS_LETTRES et _MOIS_ABREGES). Plusieurs
-    correspondances peuvent apparaître sur une même ligne (faux positifs,
-    ex. un fragment du numéro de passeport lu comme "94HTI02") : on ignore
-    silencieusement celles dont le texte ne correspond à aucun mois connu et
-    on essaie la suivante, plutôt que d'abandonner la ligne entière.
+
+def _chercher_date_naissance(detections):
     """
-    for ligne in lignes:
-        trouve = _RE_DATE.search(ligne)
+    Retourne la date de naissance trouvée sur la ligne juste EN DESSOUS du
+    libellé "Naissance" (voir _LABELS_NAISSANCE ; le libellé "Lieu de
+    naissance" contient aussi ce mot mais désigne le lieu, pas la date — voir
+    _LABELS_EXCLUS_NAISSANCE), au format JJ/MM/AAAA.
+
+    Recherche par POSITION plutôt qu'un balayage de la première date trouvée
+    dans tout le document : un passeport peut afficher d'autres nombres à
+    motif de date sans rapport ailleurs sur la page (ex: le "Numéro
+    d'identification nationale" imprimé sur la page opposée du passeport,
+    visible en transparence sur la photo, qui correspond par coïncidence au
+    motif JJ-MM-AAAA), ou d'autres dates bien réelles mais d'un autre champ
+    (émission/expiration) — un balayage global peut prendre l'une ou l'autre
+    à tort avant même d'atteindre la vraie date de naissance — constaté en
+    conditions réelles.
+
+    La marge de recherche verticale est proportionnelle à la hauteur moyenne
+    des boîtes détectées (donc indépendante de la résolution/du zoom de la
+    photo), pas un nombre de pixels fixe. Contrairement à _chercher_valeur_liee
+    (utilisé pour nom/prénom/numéro), aucune contrainte horizontale n'est
+    appliquée : en pratique, le centre de la boîte de valeur (un token court,
+    ex: "01Me/Mai02") est souvent décalé à GAUCHE du centre de sa boîte de
+    libellé, bien plus longue (ex: "Dat li fèt/Date de naissance") — une
+    contrainte "jamais à gauche" exclurait alors à tort la vraie valeur,
+    constaté en conditions réelles.
+
+    Chaque candidat est validé avant d'être retourné (voir _date_valide) : un
+    format reconnu (JJ-MM-AAAA ou JJ + mois abrégé + AA) qui ne correspond à
+    aucune date calendaire réelle est ignoré silencieusement, et le suivant
+    essayé.
+    """
+    hauteurs = [d['h'] for d in detections if d.get('h')]
+    marge_y = 4 * (sum(hauteurs) / len(hauteurs)) if hauteurs else 60
+
+    ancres = [
+        d for d in detections
+        if _label_present(d['texte'], _LABELS_NAISSANCE)
+        and not _label_present(d['texte'], _LABELS_EXCLUS_NAISSANCE)
+    ]
+    candidats = []
+    for ancre in ancres:
+        for autre in detections:
+            if autre is ancre or _est_un_label(autre['texte']):
+                continue
+            dy = autre['cy'] - ancre['cy']
+            if 0 < dy <= marge_y:
+                candidats.append((dy, autre['texte']))
+    candidats.sort(key=lambda p: p[0])
+
+    for _, texte in candidats:
+        trouve = _RE_DATE.search(texte)
         if trouve:
-            return trouve.group(0)
-    for ligne in lignes:
-        for trouve in _RE_DATE_MOIS_LETTRES.finditer(ligne):
+            jour, mois, annee = (int(x) for x in trouve.groups())
+            if _date_valide(jour, mois, annee):
+                return trouve.group(0)
+    for _, texte in candidats:
+        trouve = _RE_DATE_MOIS_LETTRES.search(texte)
+        if trouve:
             jour, mois_texte, annee_deux_chiffres = trouve.groups()
             mois = _mois_depuis_texte(mois_texte)
             if mois:
-                return f"{int(jour):02d}/{mois:02d}/{_annee_sur_quatre_chiffres(annee_deux_chiffres)}"
+                annee = _annee_sur_quatre_chiffres(annee_deux_chiffres)
+                if _date_valide(int(jour), mois, annee):
+                    return f"{int(jour):02d}/{mois:02d}/{annee}"
     return None
 
 
@@ -313,13 +551,15 @@ def extraire_infos_piece(chemin_image, type_document):
     for page in resultat or []:
         for boite, (texte, confiance) in (page or []):
             cx, cy = _centre_boite(boite)
-            detections.append({'texte': texte, 'cx': cx, 'cy': cy})
+            hauteur = max(p[1] for p in boite) - min(p[1] for p in boite)
+            detections.append({'texte': texte, 'cx': cx, 'cy': cy, 'h': hauteur})
             confiances.append(float(confiance))   # float natif : évite un numpy.float32 non JSON-sérialisable
 
     lignes = [d['texte'] for d in detections]
 
-    labels_numero = _LABELS_NUMERO_PAR_TYPE.get(type_document, _LABELS_NUMERO_PATENTE)
-    numero_brut   = _chercher_valeur_liee(detections, labels_numero, filtre=_ressemble_a_un_numero)
+    labels_numero   = _LABELS_NUMERO_PAR_TYPE.get(type_document, _LABELS_NUMERO_PATENTE)
+    filtre_numero   = _ressemble_a_un_numero_passeport if type_document == 'passeport' else _ressemble_a_un_numero
+    numero_brut     = _chercher_valeur_liee(detections, labels_numero, filtre=filtre_numero)
 
     nom_entreprise = None
     nom = prenom = None
@@ -337,7 +577,15 @@ def extraire_infos_piece(chemin_image, type_document):
         # (priorité 2 de _chercher_valeur_liee) qui renvoie alors un fragment
         # de texte totalement sans rapport — constaté en conditions réelles.
     else:
-        nom    = _chercher_valeur_liee(detections, _LABELS_NOM, exclure=_LABELS_EXCLUS_NOM)
+        # "SIYATI" d'abord : contrairement à "NOM" (voir _LABELS_NOM_PRIORITAIRE),
+        # ce token n'a aucune chance de se cacher dans une variante mal lue du
+        # libellé PRÉNOM voisin — on ne retombe sur le jeu complet _LABELS_NOM
+        # (avec son exclusion PRENOM, tolérante aux fautes d'OCR, en filet de
+        # sécurité) que si "SIYATI" n'apparaît nulle part sur la pièce, même
+        # approximativement (OCR n'a pas su le lire du tout).
+        nom = _chercher_valeur_liee(detections, _LABELS_NOM_PRIORITAIRE, exclure=_LABELS_EXCLUS_NOM)
+        if not nom:
+            nom = _chercher_valeur_liee(detections, _LABELS_NOM, exclure=_LABELS_EXCLUS_NOM)
         prenom = _chercher_valeur_liee(detections, _LABELS_PRENOM)
 
     # le permis n'a pas de champ PRENOM distinct : nom et prénom sont fusionnés
@@ -353,7 +601,7 @@ def extraire_infos_piece(chemin_image, type_document):
         'prenom':         prenom,
         'numero_piece':   _nettoyer_numero(numero_brut),
         'nom_entreprise': nom_entreprise,
-        'date_naissance': _chercher_date_naissance(lignes),
+        'date_naissance': _chercher_date_naissance(detections),
         'texte_brut':     "\n".join(lignes),
         'confiance':      sum(confiances) / len(confiances) if confiances else 0.0,
     }

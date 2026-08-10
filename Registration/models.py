@@ -1,7 +1,10 @@
 # ── IMPORTS ───────────────────────────────────────────────────────────────────
-import hashlib   # algorithme SHA-256 pour hasher les mots de passe
-import secrets   # générateur de nombres aléatoires cryptographiquement sûrs (sel + tokens)
+import hashlib       # algorithme SHA-256 — conservé UNIQUEMENT pour vérifier les hachages hérités (voir plus bas)
+import re            # nettoyage du nom de fichier du contrat PDF (voir _nom_fichier_contrat)
+import secrets       # générateur de nombres aléatoires cryptographiquement sûrs (sel + tokens)
+import unicodedata   # retrait des accents du nom de fichier du contrat PDF (voir _nom_fichier_contrat)
 
+from django.contrib.auth.hashers import make_password, check_password  # PBKDF2 (sel + nombreuses itérations)
 from django.db    import models        # classes de base pour définir les modèles Django
 from django.utils import timezone      # horodatage UTC cohérent avec USE_TZ = True
 from geopy.distance import geodesic   # calcul de distance réelle entre deux points GPS
@@ -9,18 +12,51 @@ from geopy.distance import geodesic   # calcul de distance réelle entre deux po
 
 # ── FONCTIONS DE HASHAGE ──────────────────────────────────────────────────────
 # Définies ici (et non dans views.py) pour éviter les imports circulaires.
+#
+# Audit de sécurité (demande explicite) : le schéma d'origine était un simple
+# SHA-256+sel à UNE seule itération — un algorithme volontairement rapide,
+# donc particulièrement mal adapté au hachage de mots de passe : en cas de
+# fuite de la base, des milliards de hachages/seconde sont calculables sur un
+# GPU grand public, rendant même des mots de passe moyennement complexes
+# cassables très vite. Remplacé par PBKDF2 (django.contrib.auth.hashers,
+# nombreuses itérations, volontairement lent) — le format Django "pbkdf2_sha256$
+# <itérations>$<sel>$<hash>" se reconnaît sans ambiguïté par ses 3 caractères
+# "$" (l'ancien format "sel$hash" n'en a qu'un seul, voir est_ancien_hash).
+#
+# Migration SANS rupture ni réinitialisation forcée : verifier_password
+# continue d'accepter l'ancien format pour les comptes pas encore reconnectés
+# depuis ce changement ; seConnecter (Registration/views.py) re-hache
+# silencieusement avec le nouveau schéma dès qu'une connexion réussit avec un
+# ancien hachage — la base se met à jour progressivement, à l'usage, sans
+# script de migration ni interruption de service pour personne.
+def est_ancien_hash(hashed):
+    """True si `hashed` est au format hérité "sel$hash" (SHA-256, une seule
+    itération) plutôt qu'un hachage PBKDF2 Django ("pbkdf2_sha256$...")."""
+    return hashed.count('$') == 1 and not hashed.startswith('pbkdf2_')
+
+
 def haser_password(password):
-    """Hash un mot de passe en clair avec un sel aléatoire (SHA-256 + sel)."""
-    sel  = secrets.token_hex(16)                                      # sel de 32 caractères hex (128 bits)
-    hash = hashlib.sha256((password + sel).encode()).hexdigest()      # hash du couple mot_de_passe+sel
-    return f"{sel}${hash}"   # format stocké en base : "sel$hash"
+    """Hash un mot de passe en clair avec PBKDF2 (sel aléatoire + nombreuses
+    itérations, voir django.contrib.auth.hashers.make_password)."""
+    return make_password(password)
 
 
 def verifier_password(password, hashed):
-    """Vérifie qu'un mot de passe en clair correspond au hash stocké."""
-    sel, hash   = hashed.split('$')                                   # extraire sel et hash du format stocké
-    hash_entrer = hashlib.sha256((password + sel).encode()).hexdigest()  # recalculer le hash
-    return hash_entrer == hash   # True si les hash correspondent
+    """Vérifie qu'un mot de passe en clair correspond au hash stocké — accepte
+    aussi bien le nouveau format PBKDF2 que l'ancien format hérité "sel$hash"
+    (voir est_ancien_hash ci-dessus), pour ne jamais invalider un mot de
+    passe déjà enregistré pendant la période de migration progressive."""
+    if est_ancien_hash(hashed):
+        sel, hash_stocke = hashed.split('$')
+        hash_calcule = hashlib.sha256((password + sel).encode()).hexdigest()
+        return hash_calcule == hash_stocke
+    return check_password(password, hashed)
+
+
+# au-delà de ce nombre d'avertissements (un par avis supprimé par un admin
+# suite à un signalement, voir supprimerAvis, Produits/views/avisViews.py),
+# le compte est bloqué automatiquement — voir Utilisateur.ajouter_avertissement
+SEUIL_AVERTISSEMENTS = 10
 
 
 # ── MODÈLE UTILISATEUR (CLASSE PARENTE) ───────────────────────────────────────
@@ -35,6 +71,12 @@ class Utilisateur(models.Model):
     date_inscription = models.DateTimeField(auto_now_add=True)     # date de création, non modifiable
     est_actif        = models.BooleanField(default=False)          # True = utilisateur en ligne sur le site
     est_bloquer      = models.BooleanField(default=False)          # True = compte suspendu par un admin
+    # raison saisie par l'admin au moment du blocage (voir bloquer() plus bas)
+    # — vidée au déblocage. Permet à seConnecter de la renvoyer au prochain
+    # essai de connexion (demande explicite : dire précisément ce qui s'est
+    # passé, pas juste "compte bloqué"), en plus de l'email déjà envoyé et de
+    # la trace dans JournalAudit.
+    raison_blocage   = models.TextField(blank=True, default='')
     # passe à True automatiquement dès que le compte reçoit plus de 5
     # signalements pour le même motif (voir signalerVendeur,
     # Produits/views/signalementsViews.py) : le vendeur ne peut plus publier de
@@ -50,6 +92,20 @@ class Utilisateur(models.Model):
     # "vues du profil" du tableau de bord vendeur (voir statistiquesVendeur,
     # Produits/views/produitsViews.py)
     nombre_vues_profil = models.PositiveIntegerField(default=0)
+    # incrémenté à chaque avis de ce compte supprimé par un admin suite à un
+    # signalement (voir supprimerAvis, Produits/views/avisViews.py) — au-delà
+    # de SEUIL_AVERTISSEMENTS, le compte est bloqué automatiquement (voir
+    # ajouter_avertissement ci-dessous)
+    nombre_avertissements = models.PositiveIntegerField(default=0)
+    # posé à True par reinitialiserMotDePasseAdmin (Registration/views.py,
+    # réservé au super super admin et aux comptes "tous les droits" agissant
+    # sur un admin à droits limités — voir peut_agir_sur_admin) : le mot de
+    # passe actuel reste valable (pas d'invalidation immédiate, pas de mot de
+    # passe temporaire envoyé par email), mais la prochaine connexion réussie
+    # doit obligatoirement passer par un changement de mot de passe avant
+    # d'accéder au reste de la plateforme — voir seConnecter (inclut ce champ
+    # dans la réponse) et modifierMotDePasse (le remet à False au succès)
+    doit_changer_mot_de_passe = models.BooleanField(default=False)
 
     class Meta:
         db_table            = 'utilisateur'    # nom de la table SQL
@@ -85,19 +141,75 @@ class Utilisateur(models.Model):
         type(self).objects.filter(id=self.id).update(nombre_vues_profil=F('nombre_vues_profil') + 1)
         self.nombre_vues_profil += 1
 
-    def bloquer(self):
-        """Suspend le compte (accès admin, voir Registration/views.py::toggleBloquerUtilisateur)
-        et invalide immédiatement toute session active en supprimant ses tokens —
-        sinon un utilisateur déjà connecté garderait l'accès jusqu'à expiration
-        naturelle du token (pas de TTL ici, donc indéfiniment)."""
+    def bloquer(self, raison=''):
+        """
+        Suspend le compte (accès admin, voir Registration/views.py::
+        toggleBloquerUtilisateur) — coupe complètement l'accès à la
+        plateforme (demande explicite, corrige un bug réel constaté en
+        production : un compte bloqué restait connecté et pouvait continuer
+        à publier des produits) : invalide immédiatement toute session
+        active (suppression des tokens, comme le fait déjà
+        reinitialiserMotDePasseAdmin/révocation des droits admin ailleurs
+        dans Registration/views.py) ET seConnecter refuse désormais toute
+        nouvelle connexion pour ce compte (voir Registration/views.py),
+        avec un message reprenant cette raison (demande explicite : dire à
+        l'utilisateur ce qui s'est passé, pas juste qu'il est bloqué).
+        Son seul recours pour demander un déblocage passe alors par le
+        formulaire public "Contactez-nous" (src/pages/ContacterNous.jsx),
+        qui ne nécessite pas d'être connecté.
+
+        Un vendeur bloqué perd en plus sa capacité à vendre : tous ses
+        produits déjà publiés passent indisponibles (sauvegarde individuelle,
+        pas de bulk .update(), pour que chacun déclenche normalement
+        broadcast_produit et reste cohérent en temps réel sur les catalogues
+        déjà affichés — même principe que la suspension automatique dans
+        signalerVendeur, Produits/views/signalementsViews.py) et il ne peut
+        plus en publier de nouveau (voir creerProduit).
+        """
         self.est_bloquer = True
-        self.save()
+        self.raison_blocage = raison
+        self.save(update_fields=['est_bloquer', 'raison_blocage'])
+
+        # révocation immédiate de toute session active — sans ça, un compte
+        # déjà connecté au moment du blocage aurait continué à agir avec son
+        # token existant jusqu'à expiration naturelle (jamais, ici)
         self.tokens.all().delete()
 
+        if self.profil.role == 'vendeur':
+            from Produits.models import Produits   # import différé : évite un cycle Registration <-> Produits
+            for produit in Produits.objects.filter(vendeur=self, est_disponible=True):
+                produit.est_disponible = False
+                produit.save(update_fields=['est_disponible'])
+
     def debloquer(self):
-        """Réactive un compte suspendu (accès admin)."""
+        """
+        Lève le blocage (accès admin). Ne réactive PAS automatiquement les
+        produits d'un vendeur laissés indisponibles par bloquer() ci-dessus :
+        c'est au vendeur de les rendre disponibles lui-même, un par un, une
+        fois débloqué — même règle que reactiverVendeurAdmin (Registration/
+        views.py) pour la suspension automatique par signalements.
+        """
         self.est_bloquer = False
-        self.save()
+        self.raison_blocage = ''
+        self.save(update_fields=['est_bloquer', 'raison_blocage'])
+
+    def ajouter_avertissement(self):
+        """
+        Incrémente nombre_avertissements (voir supprimerAvis, Produits/views/
+        avisViews.py — un avertissement par avis supprimé par un admin suite à
+        un signalement). Au-delà de SEUIL_AVERTISSEMENTS, bloque
+        automatiquement le compte (voir bloquer() ci-dessus). Retourne True si
+        ce dépassement de seuil vient de déclencher le blocage (pour que
+        l'appelant sache s'il doit prévenir l'utilisateur du blocage en plus
+        de l'avertissement), False sinon.
+        """
+        self.nombre_avertissements += 1
+        self.save(update_fields=['nombre_avertissements'])
+
+        if self.nombre_avertissements >= SEUIL_AVERTISSEMENTS and not self.est_bloquer:
+            self.bloquer()
+            return True
+        return False
 
 
 # ── MODÈLE VENDEUR ────────────────────────────────────────────────────────────
@@ -357,6 +469,33 @@ class Entreprise(Utilisateur):
         return geodesic(coord1, coord2).kilometers
 
 
+def _nom_fichier_contrat(utilisateur):
+    """
+    Nom de fichier du contrat vendeur (pièce jointe email + fichier stocké
+    servi au téléchargement, voir DemandeVerification.marquer_verifie) :
+    "RekoltHT-contrat-{nom}-{prenom}-{JJMMAAAA}-{HHhMM}.pdf" (demande
+    explicite). Accents retirés et caractères hors [A-Za-z0-9-] remplacés par
+    un tiret — un nom de fichier avec accents/espaces pose problème dans
+    certains clients email/systèmes de fichiers. Une Entreprise n'a pas de
+    prénom (voir creerEntreprise, prenom='' à la création) : ce segment est
+    alors simplement omis plutôt que de laisser un tiret vide. Heure au
+    fuseau d'Haïti (America/Port-au-Prince, TIME_ZONE — voir
+    BackendRekoltHt/settings/base.py) : timezone.now() seul renvoie
+    toujours l'UTC (USE_TZ=True), décalé de l'heure d'Haïti — il faut
+    explicitement convertir via timezone.localtime() (même principe déjà en
+    place dans audit_rapport_service.py pour les rapports PDF).
+    """
+    def _nettoyer(valeur):
+        sans_accents = ''.join(
+            c for c in unicodedata.normalize('NFD', valeur or '') if unicodedata.category(c) != 'Mn'
+        )
+        return re.sub(r'[^A-Za-z0-9]+', '-', sans_accents).strip('-')
+
+    parties = [p for p in (_nettoyer(utilisateur.nom), _nettoyer(utilisateur.prenom)) if p] or ['utilisateur']
+    horodatage = timezone.localtime().strftime('%d%m%Y-%Hh%M')
+    return f"RekoltHT-contrat-{'-'.join(parties)}-{horodatage}.pdf"
+
+
 # ── MODÈLE DEMANDE DE VÉRIFICATION ────────────────────────────────────────────
 class DemandeVerification(models.Model):
     """
@@ -466,7 +605,7 @@ class DemandeVerification(models.Model):
         from .services.contrat_service import generer_contrat
 
         pdf_bytes   = generer_contrat(self).read()
-        nom_fichier = f"contrat_{self.id}.pdf"
+        nom_fichier = _nom_fichier_contrat(self.utilisateur)
         self.contrat_pdf.save(nom_fichier, ContentFile(pdf_bytes), save=False)
         self.save()
 
@@ -554,6 +693,50 @@ class CodeReinitialisation(models.Model):
         return not self.utilise and timezone.now() < self.date_expiration
 
 
+# ── MODÈLE INSCRIPTION EN ATTENTE D'ACTIVATION ────────────────────────────────
+class InscriptionEnAttente(models.Model):
+    """
+    Données d'un formulaire d'inscription classique (voir sinscrire,
+    Registration/views.py) — le compte Utilisateur n'est créé qu'après clic
+    sur le lien d'activation reçu par email (voir confirmerInscription).
+    Demande explicite : seul un utilisateur avec un email opérationnel peut
+    créer et utiliser un compte. Ne concerne pas l'inscription Google OAuth
+    (google_inscription) : Google a déjà vérifié l'email, aucune activation
+    supplémentaire n'y est nécessaire.
+    """
+
+    email        = models.EmailField(unique=True)   # une nouvelle demande pour le même email remplace l'ancienne
+    nom          = models.CharField(max_length=100)
+    prenom       = models.CharField(max_length=100)
+    mot_de_passe = models.CharField(max_length=255)  # déjà haser_password(...), jamais en clair
+    telephone    = models.CharField(max_length=20)
+    # champs optionnels du formulaire (bio, photo_profil, adresse, commune,
+    # ville, pays, role, latitude, longitude) — ré-appliqués sur le Profil à
+    # la confirmation, voir confirmerInscription
+    donnees_optionnelles = models.JSONField(default=dict, blank=True)
+
+    token           = models.CharField(max_length=64, unique=True)
+    date_creation   = models.DateTimeField(auto_now_add=True)
+    date_expiration = models.DateTimeField()   # calculé à la création : now() + 10 min (voir sinscrire/renvoyerActivation, Registration/views.py)
+
+    class Meta:
+        db_table            = 'inscription_en_attente'
+        verbose_name        = "Inscription en attente d'activation"
+        verbose_name_plural = "Inscriptions en attente d'activation"
+        ordering            = ['-date_creation']
+
+    def __str__(self):
+        return f"Inscription en attente — {self.email}"
+
+    def est_valide(self):
+        """Retourne True si le lien d'activation n'a pas expiré — même
+        principe que CodeReinitialisation.est_valide() ci-dessus, sans champ
+        `utilise` : la ligne est supprimée dès la confirmation réussie
+        (voir confirmerInscription), donc son existence même signifie
+        "pas encore confirmée"."""
+        return timezone.now() < self.date_expiration
+
+
 # ── MODÈLE TOKEN D'AUTHENTIFICATION ──────────────────────────────────────────
 class Token(models.Model):
     """
@@ -582,13 +765,38 @@ class Token(models.Model):
 # ── MODÈLE CLÉ DE CHIFFREMENT (messagerie de bout en bout) ───────────────────
 class CleChiffrementUtilisateur(models.Model):
     """
-    Matériel de clé asymétrique (ECDH P-256) permettant le chiffrement de bout
-    en bout de la messagerie (voir Messagerie/models.py::Message.chiffre et
-    MessageSupport). La clé publique est stockée en clair (par définition non
-    secrète). La clé privée n'est JAMAIS connue du serveur : elle est générée
-    et chiffrée côté navigateur avec une clé dérivée d'un code PIN choisi par
-    l'utilisateur (PBKDF2), puis seul le résultat chiffré est envoyé ici — le
-    serveur ne peut donc jamais lire le contenu des messages.
+    Matériel de chiffrement de bout en bout de la messagerie (ECDH P-256, voir
+    Messagerie/models.py::Message.chiffre et MessageSupport).
+
+    cle_publique n'est par définition pas secrète, stockée en clair.
+
+    La clé privée, elle, n'est JAMAIS transmise ni stockée en clair. Une
+    copie CHIFFRÉE en est néanmoins sauvegardée ici (cle_privee_chiffree +
+    iv_cle_privee), pour qu'un utilisateur retrouve automatiquement sa
+    messagerie sur un nouvel appareil sans rien avoir à saisir de plus. La
+    clé d'enveloppe qui protège cette copie est dérivée via PBKDF2
+    (sel_kdf/iterations_kdf) d'un secret que seul l'utilisateur peut fournir
+    et que le serveur ne stocke jamais :
+      - compte classique : le mot de passe du compte ;
+      - compte connecté uniquement via Google : le "sub" Google (identifiant
+        stable du compte, non affiché publiquement — voir google_connection/
+        google_inscription ci-dessus), transmis une seule fois à la
+        connexion et jamais persisté, faute de mot de passe connu.
+    Dans les deux cas, ce secret est déjà obtenu par le simple fait de se
+    connecter : aucune saisie supplémentaire n'est nécessaire (voir
+    src/utils/e2eCrypto.js::deriverCleEnveloppe et
+    src/api/e2eStore.js::garantirCleE2E). Le serveur ne voit donc jamais la
+    clé privée en clair, seulement un blob qu'il est incapable de déchiffrer
+    lui-même.
+
+    En cas de mot de passe oublié réinitialisé par code (l'ancien mot de
+    passe n'est alors jamais connu, donc impossible de re-envelopper la clé
+    existante) : cette ligne est supprimée par reinitialiserMotDePasse et une
+    nouvelle paire de clés est régénérée automatiquement à la prochaine
+    connexion. En cas de changement de mot de passe classique (l'ancien ET
+    le nouveau sont connus), la clé privée est simplement ré-enveloppée avec
+    le nouveau mot de passe dans la même requête (voir modifierMotDePasse),
+    sans rien perdre.
     """
 
     utilisateur = models.OneToOneField(
@@ -597,11 +805,15 @@ class CleChiffrementUtilisateur(models.Model):
                     related_name = 'cle_chiffrement'
                   )
 
-    cle_publique       = models.TextField()                # JWK JSON de la clé publique ECDH
-    cle_privee_chiffree = models.TextField()                # clé privée (JWK JSON) chiffrée AES-GCM, en base64
-    iv_cle_privee       = models.CharField(max_length=64)   # IV (base64) utilisé pour ce chiffrement
-    sel_kdf             = models.CharField(max_length=64)   # sel (base64) utilisé par PBKDF2 pour dériver la clé depuis le PIN
-    iterations_kdf       = models.PositiveIntegerField(default=210000)   # nombre d'itérations PBKDF2, conservé pour pouvoir l'ajuster sans casser les clés déjà enveloppées
+    cle_publique = models.TextField()   # JWK JSON de la clé publique ECDH
+
+    # copie de secours de la clé privée (JWK JSON), chiffrée en AES-GCM avec
+    # une clé dérivée du mot de passe (ou du sub Google) du compte — reste
+    # nul tant qu'aucun appareil n'a encore synchronisé sa sauvegarde
+    cle_privee_chiffree = models.TextField(blank=True, null=True)
+    iv_cle_privee       = models.CharField(max_length=64, blank=True, null=True)
+    sel_kdf             = models.CharField(max_length=64, blank=True, null=True)
+    iterations_kdf      = models.PositiveIntegerField(blank=True, null=True)
 
     date_creation = models.DateTimeField(auto_now_add=True)
     date_maj      = models.DateTimeField(auto_now=True)
@@ -613,3 +825,426 @@ class CleChiffrementUtilisateur(models.Model):
 
     def __str__(self):
         return f"Clé de chiffrement de {self.utilisateur.email}"
+
+
+# ── MODÈLE DROITS ADMIN ────────────────────────────────────────────────────────
+class DroitsAdmin(models.Model):
+    """
+    Droits granulaires d'un compte administrateur (Profil.role == 'admin').
+    Un compte admin sans DroitsAdmin n'a aucun droit — un admin n'a donc accès
+    à une fonctionnalité que si ce droit lui a été explicitement attribué (ou
+    si super_admin est vrai, qui les implique tous). Voir verifier_droit_admin
+    ci-dessous, utilisé par toutes les vues admin de tout le backend
+    (Registration/Produits/Messagerie), et enregistrer_audit qui journalise
+    chaque action mutante effectuée grâce à un de ces droits (voir JournalAudit).
+    """
+
+    utilisateur = models.OneToOneField(
+                    Utilisateur,
+                    on_delete    = models.CASCADE,
+                    related_name = 'droits_admin'
+                  )
+
+    # implique TOUS les droits ci-dessous, et donne accès à la gestion des
+    # autres admins (créer, modifier leurs droits, bloquer, révoquer, réinitialiser
+    # leur mot de passe — voir listerAdmins/creerAdmin/promouvoirAdmin/
+    # modifierDroitsAdmin/revoquerAdmin/reinitialiserMotDePasseAdmin,
+    # Registration/views.py). Affiché "Tous les droits" côté frontend (pas
+    # "Super admin" — ce libellé est réservé à est_super_super_admin
+    # ci-dessous). Un compte "Tous les droits" ne peut PAS agir (modifier ses
+    # droits, bloquer, révoquer, réinitialiser le mot de passe) sur lui-même
+    # NI sur un autre compte "Tous les droits" — seulement sur un admin à
+    # droits limités. Voir peut_agir_sur_admin ci-dessous, qui encode cette
+    # hiérarchie et est appelée par toutes les vues de gestion des admins.
+    super_admin = models.BooleanField(default=False)
+
+    # UNIQUE sur toute la plateforme, jamais attribuable via l'API (ni à la
+    # création, ni via modifierDroitsAdmin — voir _appliquer_droits qui ne
+    # touche jamais ce champ), posé UNIQUEMENT par le bootstrap du tout
+    # premier compte (voir Registration/signals.py::creer_profil). Rend ce
+    # compte intouchable : personne — pas même un autre compte "Tous les
+    # droits" — ne peut le bloquer, le révoquer, modifier ses droits ou
+    # réinitialiser son mot de passe (voir peut_agir_sur_admin). En
+    # contrepartie, LUI seul peut effectuer ces actions sur N'IMPORTE QUEL
+    # autre admin, y compris un autre compte "Tous les droits".
+    est_super_super_admin = models.BooleanField(default=False)
+
+    # bloquer/débloquer/supprimer un compte, réactiver un vendeur suspendu
+    # par signalements (voir toggleBloquerUtilisateur/supprimerUtilisateurAdmin/
+    # reactiverVendeurAdmin, Registration/views.py)
+    gestion_utilisateurs = models.BooleanField(default=False)
+
+    # traiter les signalements (produits, vendeurs, messages, avis),
+    # désactiver/réactiver un produit signalé, supprimer un message/avis signalé
+    gestion_signalements = models.BooleanField(default=False)
+
+    # lister les demandes de vérification KYC en attente (l'approbation/rejet
+    # reste pour l'instant réservée à Django admin, hors API — voir
+    # Registration/admin.py::DemandeVerificationAdmin)
+    gestion_verifications = models.BooleanField(default=False)
+
+    # créer/modifier/supprimer catégories et sous-catégories de produits
+    gestion_categories = models.BooleanField(default=False)
+
+    # répondre aux messages support (vendeur/acheteur → admins, voir
+    # Messagerie/views.py::repondreMessageAdmin)
+    gestion_support = models.BooleanField(default=False)
+
+    # configurer/déclencher les sauvegardes, consulter et télécharger
+    # l'historique (voir Sauvegarde/views.py) — la RESTAURATION d'un backup
+    # est volontairement plus stricte et exige super_admin, pas seulement ce
+    # droit (action la plus destructrice du système, voir restaurer_analyser/
+    # restaurer_confirmer, Sauvegarde/views.py)
+    gestion_sauvegardes = models.BooleanField(default=False)
+
+    # réinitialiser le mot de passe d'un AUTRE admin (voir
+    # reinitialiserMotDePasseAdmin, Registration/views.py) — un compte "Tous
+    # les droits" peut attribuer ce droit précis à un admin à droits limités
+    # (délégation descendante), mais un admin qui ne possède QUE ce droit ne
+    # peut réinitialiser le mot de passe que d'un autre admin à droits
+    # limités, jamais celui d'un compte "Tous les droits" ni du super super
+    # admin (même hiérarchie que gestion_utilisateurs pour bloquer/révoquer,
+    # voir peut_agir_sur_admin)
+    gestion_mots_de_passe = models.BooleanField(default=False)
+
+    # traçabilité : qui a attribué/modifié ces droits en dernier
+    attribue_par = models.ForeignKey(
+                     Utilisateur, on_delete=models.SET_NULL, null=True, blank=True,
+                     related_name='droits_attribues'
+                   )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_maj      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table            = 'droits_admin'
+        verbose_name        = 'Droits admin'
+        verbose_name_plural = 'Droits admin'
+
+    def __str__(self):
+        suffixe = " (propriétaire)" if self.est_super_super_admin else " (tous les droits)" if self.super_admin else ""
+        return f"Droits de {self.utilisateur.email}" + suffixe
+
+    def a_droit(self, nom_droit):
+        """True si super super admin, super_admin ("tous les droits" — implique
+        les deux), ou si le droit précis (par son nom de champ) est accordé."""
+        return self.est_super_super_admin or self.super_admin or bool(getattr(self, nom_droit, False))
+
+
+def verifier_droit_admin(utilisateur, droit):
+    """
+    True si `utilisateur` est un compte admin ET possède le droit demandé
+    (directement, ou via super_admin). Utilisé à la place de la simple
+    vérification `role == 'admin'` dans toutes les vues admin du backend —
+    voir le tableau de correspondance vue → droit dans Registration/views.py
+    et les fichiers équivalents de Produits/Messagerie. Défini ici (pas dans
+    views.py) pour éviter les imports circulaires, même raison que
+    haser_password/verifier_password ci-dessus — importable directement
+    depuis Produits/Messagerie, qui importent déjà Registration.models.
+    """
+    if not utilisateur or utilisateur.profil.role != 'admin':
+        return False
+    droits = getattr(utilisateur, 'droits_admin', None)
+    return bool(droits) and droits.a_droit(droit)
+
+
+def peut_agir_sur_admin(acteur, cible):
+    """
+    True si `acteur` (un compte admin) est autorisé à bloquer/révoquer/
+    modifier les droits/réinitialiser le mot de passe de `cible` (un autre
+    compte admin). Hiérarchie, du plus au moins large :
+      - le super super admin (unique, voir DroitsAdmin.est_super_super_admin)
+        peut agir sur n'importe quel autre admin, y compris un compte "Tous
+        les droits" ;
+      - personne — pas même un autre super super admin, puisqu'il n'en existe
+        qu'un seul — ne peut agir sur LE super super admin : intouchable ;
+      - un compte "Tous les droits" (super_admin) peut agir sur un admin à
+        droits limités, mais jamais sur un autre compte "Tous les droits" ;
+      - un admin à droits limités ne peut jamais agir sur un autre admin via
+        cette fonction (l'appelant doit de toute façon déjà avoir vérifié un
+        droit de gestion précis — gestion_utilisateurs, gestion_mots_de_passe...
+        — avant même d'arriver ici).
+    L'action sur SOI-MÊME est toujours refusée par l'appelant AVANT d'appeler
+    cette fonction (règle universelle, indépendante des droits, vérifiée
+    séparément dans chaque vue — voir toggleBloquerUtilisateur/revoquerAdmin/
+    modifierDroitsAdmin/reinitialiserMotDePasseAdmin, Registration/views.py).
+    """
+    droits_acteur = getattr(acteur, 'droits_admin', None)
+    droits_cible  = getattr(cible, 'droits_admin', None)
+    if not droits_acteur or not droits_cible:
+        return False
+    if droits_cible.est_super_super_admin:
+        return False
+    if droits_acteur.est_super_super_admin:
+        return True
+    if droits_cible.super_admin:
+        return False
+    return droits_acteur.super_admin
+
+
+def peut_reinitialiser_mdp(acteur, cible):
+    """
+    Hiérarchie SPÉCIFIQUE à la réinitialisation de mot de passe (voir
+    reinitialiserMotDePasseAdmin, Registration/views.py) — plus permissive
+    que peut_agir_sur_admin ci-dessus pour la partie "droits limités" :
+      - le super super admin peut agir sur tout le monde ;
+      - personne ne peut agir sur le super super admin ;
+      - un compte "Tous les droits" peut agir sur n'importe quel admin à
+        droits limités (mais jamais sur un autre compte "Tous les droits") ;
+      - un admin à droits limités qui possède le droit gestion_mots_de_passe
+        peut réinitialiser le mot de passe d'un AUTRE admin à droits
+        limités — SAUF si celui-ci possède lui aussi gestion_mots_de_passe
+        (règle explicite : deux comptes avec le même droit délégué ne
+        peuvent pas agir l'un sur l'autre).
+    """
+    droits_acteur = getattr(acteur, 'droits_admin', None)
+    droits_cible  = getattr(cible, 'droits_admin', None)
+    if not droits_acteur or not droits_cible:
+        return False
+    if droits_cible.est_super_super_admin:
+        return False
+    if droits_acteur.est_super_super_admin:
+        return True
+    if droits_cible.super_admin:
+        return False
+    if droits_acteur.super_admin:
+        return True
+    return bool(droits_acteur.gestion_mots_de_passe) and not droits_cible.gestion_mots_de_passe
+
+
+# ── MODÈLE JOURNAL D'AUDIT ────────────────────────────────────────────────────
+class JournalAudit(models.Model):
+    """
+    Trace de chaque action mutante effectuée par un compte admin (qui, quoi,
+    quand) — voir enregistrer_audit ci-dessous, appelée après chaque action
+    admin qui modifie des données (pas les simples listes en lecture). Sert
+    de source au rapport PDF (voir Registration/services/audit_rapport_service.py
+    et genererRapportAudit, Registration/views.py).
+    """
+
+    # SET_NULL (pas CASCADE) : un admin supprimé ne doit pas faire disparaître
+    # la trace de ce qu'il a fait — nom_admin_snapshot garde le nom lisible
+    # même après suppression ou changement de nom du compte
+    admin = models.ForeignKey(
+              Utilisateur, on_delete=models.SET_NULL, null=True, blank=True,
+              related_name='actions_audit'
+            )
+    nom_admin_snapshot = models.CharField(max_length=200)
+
+    # code court identifiant le type d'action (ex. "utilisateur.bloquer",
+    # "signalement.traiter") — sert de clé de traduction côté frontend pour
+    # le libellé du rapport
+    action      = models.CharField(max_length=100)
+    description = models.TextField()   # phrase lisible avec les détails de l'action
+
+    date_action = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table            = 'journal_audit'
+        verbose_name        = "Entrée d'audit"
+        verbose_name_plural = "Journal d'audit"
+        ordering            = ['-date_action']
+        indexes             = [
+            models.Index(fields=['date_action', 'admin']),
+        ]
+
+    def __str__(self):
+        return f"{self.nom_admin_snapshot} — {self.action} — {self.date_action:%Y-%m-%d %H:%M}"
+
+
+def enregistrer_audit(utilisateur, action, description):
+    """Journalise une action admin — voir JournalAudit ci-dessus. À appeler
+    après le succès d'une action mutante (jamais sur un simple GET/liste)."""
+    JournalAudit.objects.create(
+        admin=utilisateur,
+        nom_admin_snapshot=f"{utilisateur.prenom} {utilisateur.nom}",
+        action=action,
+        description=description,
+    )
+
+
+# ── MODÈLE VUE DE PROFIL VENDEUR ──────────────────────────────────────────────
+class VueProfilVendeur(models.Model):
+    """Une ligne par consultation du profil public d'un vendeur (voir
+    infoVendeur, Produits/views/produitsViews.py) — journal horodaté distinct
+    du compteur cumulé Utilisateur.nombre_vues_profil : celui-ci reste un
+    total "depuis toujours", ce modèle sert uniquement à filtrer par période
+    et lister les visiteurs (voir Produits/views/vuesViews.py). infoVendeur
+    exige désormais une connexion, donc visiteur est en pratique toujours
+    renseigné — SET_NULL uniquement pour survivre à la suppression du compte
+    visiteur, même logique que JournalAudit.admin ci-dessus."""
+
+    vendeur = models.ForeignKey(Utilisateur, on_delete=models.CASCADE, related_name='vues_profil')
+    visiteur = models.ForeignKey(
+        Utilisateur, on_delete=models.SET_NULL, null=True, blank=True, related_name='vues_profils_effectuees'
+    )
+    date_vue = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "vues_profil_vendeur"
+        verbose_name = "vue profil vendeur"
+        verbose_name_plural = "vues profils vendeurs"
+        ordering = ['-date_vue']
+
+    def __str__(self):
+        return f"Vue profil #{self.vendeur_id} — {self.date_vue}"
+
+
+# ── MODÈLE DEMANDE ADMINISTRATIVE ─────────────────────────────────────────────
+class DemandeAdministrative(models.Model):
+    """
+    Demande formelle d'un utilisateur à l'administration (objet + description),
+    distincte de la messagerie support libre (MessageSupport, Messagerie/models.py) :
+    ici la demande aboutit toujours à une décision — agréée ou rejetée —
+    notifiée par email. Cas d'usage principal : contester un blocage de compte
+    (voir toggleBloquerUtilisateur, Registration/views.py, dont l'email de
+    blocage renvoie vers cette fonctionnalité), mais utilisable pour toute
+    demande nécessitant une vraie décision admin. Même squelette que
+    DemandeVerification ci-dessus (marquer_verifie/marquer_echoue ->
+    approuver/rejeter, même pattern try/except pour l'envoi d'email).
+
+    Créée automatiquement (en plus de la saisie directe via
+    creerDemandeAdministrative, utilisateur connecté) par contacterNous
+    (Registration/views.py, page publique "Contactez-nous") quand l'email
+    soumis correspond à un compte actuellement bloqué OU à un compte
+    supprimé (voir CompteSupprime plus bas) : un compte dans l'un de ces deux
+    états ne peut plus s'authentifier (bloquer() révoque tous ses tokens,
+    supprimerUtilisateurAdmin est un hard delete), donc ne peut PAS atteindre
+    creerDemandeAdministrative — qui exige un token valide. Sans cette
+    création automatique, ces demandes ne partaient que par email brut
+    (adresse DEFAULT_FROM_EMAIL), invisibles ici et sans bouton "Agréer" pour
+    débloquer — c'était le bug corrigé par cet ajout.
+    """
+
+    STATUTS = [
+        ('en_attente', 'En attente'),
+        ('approuvee',  'Approuvée'),
+        ('rejetee',    'Rejetée'),
+    ]
+
+    # SET_NULL (pas CASCADE) : une demande créée pendant qu'un compte est
+    # encore bloqué (mais pas encore traitée) ne doit pas disparaître si ce
+    # compte est supprimé entre-temps par un admin — et une demande émise
+    # depuis contacterNous pour un compte DÉJÀ supprimé n'a jamais eu de
+    # utilisateur à lier (nul dès la création). nom_contact/email_contact
+    # ci-dessous sont donc TOUJOURS renseignés à la création (jamais lus
+    # depuis self.utilisateur, qui peut devenir nul plus tard) : c'est la
+    # seule source fiable pour l'affichage admin (_serialiseDemandeAdministrative).
+    utilisateur = models.ForeignKey(
+        Utilisateur, on_delete=models.SET_NULL, null=True, blank=True, related_name='demandes_administratives'
+    )
+    nom_contact   = models.CharField(max_length=200, blank=True)
+    email_contact = models.EmailField(blank=True)
+    objet       = models.CharField(max_length=200)
+    description = models.TextField()
+    statut      = models.CharField(max_length=20, choices=STATUTS, default='en_attente')
+
+    # SET_NULL (pas CASCADE) : un admin supprimé ne doit pas faire disparaître
+    # la trace de qui a traité la demande — même principe que JournalAudit.admin
+    admin_traitant  = models.ForeignKey(
+        Utilisateur, on_delete=models.SET_NULL, null=True, blank=True, related_name='demandes_administratives_traitees'
+    )
+    reponse_admin   = models.TextField(blank=True)
+    date_creation   = models.DateTimeField(auto_now_add=True)
+    date_traitement = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "demandes_administratives"
+        verbose_name = "demande administrative"
+        verbose_name_plural = "demandes administratives"
+        ordering = ['-date_creation']
+
+    def __str__(self):
+        return f"Demande #{self.id} — {self.objet} ({self.email_contact or (self.utilisateur.email if self.utilisateur_id else 'compte supprimé')})"
+
+    def _notifier(self, sujet, corps):
+        """Envoie l'email de décision (approuvé/rejeté) au bon destinataire :
+        via envoyer_email_decision si le compte existe encore (self.utilisateur),
+        sinon directement à email_contact (compte supprimé — voir docstring de
+        la classe) — même tolérance aux échecs SMTP dans les deux cas (jamais
+        d'exception remontée, la décision est déjà enregistrée en base)."""
+        from .services.notification_service import envoyer_email_decision
+        if self.utilisateur_id:
+            envoyer_email_decision(self.utilisateur, sujet, corps)
+            return
+        if not self.email_contact:
+            return
+        from django.conf import settings
+        from django.core.mail import send_mail
+        try:
+            send_mail(sujet, corps, settings.DEFAULT_FROM_EMAIL, [self.email_contact], fail_silently=False)
+        except Exception as e:
+            print(f"[email décision demande #{self.id}] échec envoi à {self.email_contact} : {e}")
+
+    def approuver(self, admin, reponse=''):
+        """Agrée la demande — si elle concerne un compte actuellement bloqué,
+        débloque automatiquement (décision explicite : une seule action pour
+        l'admin, cohérent avec l'email de blocage qui invite à faire ce
+        recours), puis notifie le demandeur par email. Un compte supprimé
+        (self.utilisateur_id nul) n'a rien à débloquer — l'approbation
+        équivaut alors à un simple accusé de réception favorable."""
+        self.statut = 'approuvee'
+        self.admin_traitant = admin
+        self.reponse_admin = reponse
+        self.date_traitement = timezone.now()
+        self.save()
+
+        compte_debloque = bool(self.utilisateur_id and self.utilisateur.est_bloquer)
+        if compte_debloque:
+            self.utilisateur.debloquer()
+
+        from .services.notification_service import pied_de_page
+        prenom = self.utilisateur.prenom if self.utilisateur_id else (self.nom_contact.split(' ')[0] if self.nom_contact else '')
+        self._notifier(
+            f"Votre demande « {self.objet} » a été approuvée — RekoltHt",
+            f"Bonjour {prenom},\n\n"
+            f"Votre demande à l'administration a été approuvée.\n\n"
+            f"Objet : {self.objet}\n"
+            + (f"Réponse de l'administration : {reponse}\n\n" if reponse else "\n")
+            + ("Votre compte a été débloqué dans la foulée.\n" if compte_debloque else "")
+            + pied_de_page(lien_demande_administrative=bool(self.utilisateur_id)),
+        )
+
+    def rejeter(self, admin, motif):
+        """Rejette la demande avec un motif obligatoire, notifie par email —
+        même principe que DemandeVerification.marquer_echoue ci-dessus."""
+        self.statut = 'rejetee'
+        self.admin_traitant = admin
+        self.reponse_admin = motif
+        self.date_traitement = timezone.now()
+        self.save()
+
+        from .services.notification_service import pied_de_page
+        prenom = self.utilisateur.prenom if self.utilisateur_id else (self.nom_contact.split(' ')[0] if self.nom_contact else '')
+        self._notifier(
+            f"Votre demande « {self.objet} » a été rejetée — RekoltHt",
+            f"Bonjour {prenom},\n\n"
+            f"Votre demande à l'administration a été rejetée.\n\n"
+            f"Objet : {self.objet}\n"
+            f"Motif : {motif}\n"
+            + pied_de_page(lien_demande_administrative=bool(self.utilisateur_id)),
+        )
+
+
+class CompteSupprime(models.Model):
+    """Trace minimale ("tombstone") laissée quand un admin supprime
+    définitivement un compte (supprimerUtilisateurAdmin) — l'Utilisateur lui-
+    même est un hard delete (CASCADE, voir toutes les FK vers Utilisateur),
+    donc sans cette trace un email supprimé redevient indiscernable d'un
+    email jamais inscrit. Permet à seConnecter de reconnaître ce cas et
+    d'afficher la raison de la suppression au lieu du message générique
+    "email n'existe pas" (demande explicite)."""
+    email             = models.EmailField(unique=True)
+    nom               = models.CharField(max_length=100)
+    prenom            = models.CharField(max_length=100)
+    raison            = models.TextField()
+    admin             = models.ForeignKey(Utilisateur, on_delete=models.SET_NULL, null=True, blank=True, related_name='comptes_supprimes')
+    date_suppression  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "comptes_supprimes"
+        verbose_name = "compte supprimé"
+        verbose_name_plural = "comptes supprimés"
+        ordering = ['-date_suppression']
+
+    def __str__(self):
+        return f"Compte supprimé — {self.prenom} {self.nom} ({self.email})"

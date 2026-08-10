@@ -1,7 +1,7 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
-from Api.broadcast import broadcast
-from .models import Utilisateur, Entreprise, Profil, DemandeVerification
+from Api.broadcast import broadcast, broadcast_to_admins, broadcast_to_user
+from .models import Utilisateur, Entreprise, Profil, DemandeVerification, DroitsAdmin, DemandeAdministrative
 
 
 # ── CRÉER LE PROFIL AUTOMATIQUEMENT ──────────────────────────────────────────
@@ -21,12 +21,29 @@ def creer_profil(sender, instance, created, **kwargs):
     base avant celui-ci) devient automatiquement 'admin' — sans ça, personne
     n'aurait accès au dashboard admin/à la gestion des catégories sur une
     instance fraîchement déployée, faute d'un moyen de promouvoir un compte
-    autrement que par un admin déjà existant.
+    autrement que par un admin déjà existant. Ce même compte reçoit aussi
+    d'office TOUS les droits ET est_super_super_admin (voir DroitsAdmin,
+    peut_agir_sur_admin) : c'est le SEUL moyen par lequel un compte devient
+    super super admin sur toute la plateforme — jamais via l'API (voir
+    _appliquer_droits, Registration/views.py, qui ne touche jamais ce champ).
     """
     if not created:
         return
-    role = 'admin' if Utilisateur.objects.count() == 1 else 'acheteur'
+    est_premier_compte = Utilisateur.objects.count() == 1
+    role = 'admin' if est_premier_compte else 'acheteur'
     Profil.objects.create(utilisateur=instance, role=role)
+    if est_premier_compte:
+        DroitsAdmin.objects.create(
+            utilisateur=instance,
+            super_admin=True,
+            est_super_super_admin=True,
+            gestion_utilisateurs=True,
+            gestion_signalements=True,
+            gestion_categories=True,
+            gestion_support=True,
+            gestion_sauvegardes=True,
+            gestion_mots_de_passe=True,
+        )
 
 
 # ── BROADCAST WEBSOCKET — NOUVEL UTILISATEUR ─────────────────────────────────
@@ -72,6 +89,56 @@ def broadcast_utilisateur_supprime(sender, instance, **kwargs):
     """
     broadcast("utilisateur.deleted", {
         "id": instance.id,
+    })
+
+
+# ── BROADCAST WEBSOCKET — ENTREPRISE (liste admin) ───────────────────────────
+@receiver(post_save, sender=Entreprise)
+def broadcast_entreprise(sender, instance, created, **kwargs):
+    """
+    broadcast_utilisateur ci-dessus couvre déjà Entreprise (sous-classe de
+    Utilisateur, même signal post_save) mais avec les champs de
+    _serialiseUtilisateur — pas nom_Entreprise/secteur/logo/
+    statut_verification, affichés par l'onglet "admin_entreprises" de
+    ProfilAcheteur.jsx (voir AuthentificationApi.listerEntreprises). Sans ce
+    second évènement, dédié, cette liste ne reflétait jamais une entreprise
+    créée ou modifiée (KYC, coordonnées...) pendant que l'onglet est ouvert.
+    Diffusé à "admins" uniquement : seul un admin consulte cette liste.
+
+    Même champs que _serialiseEntreprise (Registration/views.py), sans
+    `request` (pas de requête HTTP dans un signal) : l'URL du logo est donc
+    rendue absolue manuellement via BACKEND_BASE_URL — même correctif que
+    Messagerie/views.py::_url_absolue_media pour broadcast_message, qui
+    laissait les photos ne pas s'afficher tant que l'utilisateur ne
+    rechargeait pas la page.
+    """
+    from django.conf import settings
+    logo_url = None
+    if instance.logo:
+        logo_url = instance.logo.url
+        if not logo_url.startswith('http'):
+            logo_url = settings.BACKEND_BASE_URL.rstrip('/') + logo_url
+
+    broadcast_to_admins("entreprise.created" if created else "entreprise.updated", {
+        "id":                  instance.id,
+        "proprietaire_id":     instance.proprietaire_id,
+        "nom_Entreprise":      instance.nom_Entreprise,
+        "secteur":             instance.secteur,
+        "description":         instance.description,
+        "email":               instance.email,
+        "telephone":           instance.telephone,
+        "adresse":             instance.adresse,
+        "departement":         instance.departement,
+        "commune":             instance.commune,
+        "section_communale":   instance.section_communale,
+        "pays":                instance.pays,
+        "logo":                logo_url,
+        "longitude":           instance.longitude,
+        "latitude":            instance.latitude,
+        "est_verifiee":        instance.est_verifiee,
+        "statut_verification": instance.statut_verification,
+        "date_creation":       instance.date_creation.isoformat(),
+        "date_maj":            instance.date_maj.isoformat(),
     })
 
 
@@ -126,3 +193,38 @@ def broadcast_verification(sender, instance, created, **kwargs):
         "statut":         instance.statut,
         "motif_echec":    instance.motif_echec,
     })
+
+
+# ── BROADCAST WEBSOCKET — DEMANDE ADMINISTRATIVE ─────────────────────────────
+@receiver(post_save, sender=DemandeAdministrative)
+def broadcast_demande_administrative(sender, instance, created, **kwargs):
+    """
+    Diffuse au groupe "admins" (voir Api/broadcast.py::broadcast_to_admins,
+    même périmètre que les signalements) — sans ça, la section "Demandes
+    administratives en attente" d'AdminDashboard.jsx n'était chargée qu'une
+    fois au montage : un autre admin connecté au même moment ne voyait ni une
+    nouvelle demande arriver, ni une déjà traitée disparaître de sa propre
+    file, tant qu'il ne rechargeait pas la page (bug constaté, demande
+    explicite de réactivité sur toutes les pages).
+
+    Une demande peut être créée directement (creerDemandeAdministrative) ou
+    automatiquement par contacterNous (compte bloqué/supprimé, voir
+    DemandeAdministrative docstring) — les deux passent par .objects.create()
+    donc created=True ici dans les deux cas. approuver()/rejeter()
+    (Registration/models.py) appellent self.save() : created=False, statut
+    déjà positionné à 'approuvee'/'rejetee' à ce moment.
+    """
+    from .views import _serialiseDemandeAdministrative
+    if created:
+        broadcast_to_admins("demande_administrative.created", _serialiseDemandeAdministrative(instance))
+        return
+    if instance.statut != 'en_attente':
+        donnees = _serialiseDemandeAdministrative(instance)
+        broadcast_to_admins("demande_administrative.traitee", {'id': instance.id})
+        # notifie aussi le demandeur lui-même (groupe personnel "user_<id>",
+        # pas "admins") : sa page "Mes demandes" (Support/DemandeAdministrative.jsx)
+        # reflète la décision sans rechargement — sans objet si le compte a
+        # depuis été supprimé (utilisateur_id nul, voir DemandeAdministrative
+        # ci-dessus), il n'y a alors plus personne à qui l'envoyer
+        if instance.utilisateur_id:
+            broadcast_to_user(instance.utilisateur_id, "demande_administrative.traitee", donnees)
