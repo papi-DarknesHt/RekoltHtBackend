@@ -14,6 +14,9 @@ db.sqlite3
 # Fichiers médias uploadés (photos de profil, etc.)
 media/
 
+# Fichiers de sauvegarde chiffrés (destination "locale", voir Sauvegarde/)
+sauvegardes/
+
 # Couverture de tests
 htmlcov/
 .coverage
@@ -26,3 +29,4 @@ htmlcov/
 *.sqlite3
 *.pyc
 *.pyc
+.venv/
