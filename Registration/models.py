@@ -23,6 +23,12 @@ def verifier_password(password, hashed):
     return hash_entrer == hash   # True si les hash correspondent
 
 
+# au-delà de ce nombre d'avertissements (un par avis supprimé par un admin
+# suite à un signalement, voir supprimerAvis, Produits/views/avisViews.py),
+# le compte est bloqué automatiquement — voir Utilisateur.ajouter_avertissement
+SEUIL_AVERTISSEMENTS = 10
+
+
 # ── MODÈLE UTILISATEUR (CLASSE PARENTE) ───────────────────────────────────────
 class Utilisateur(models.Model):
 
@@ -35,6 +41,38 @@ class Utilisateur(models.Model):
     date_inscription = models.DateTimeField(auto_now_add=True)     # date de création, non modifiable
     est_actif        = models.BooleanField(default=False)          # True = utilisateur en ligne sur le site
     est_bloquer      = models.BooleanField(default=False)          # True = compte suspendu par un admin
+<<<<<<< Updated upstream
+=======
+    # passe à True automatiquement dès que le compte reçoit plus de 5
+    # signalements pour le même motif (voir signalerVendeur,
+    # Produits/views/signalementsViews.py) : le vendeur ne peut plus publier de
+    # nouveau produit et tous ses produits existants deviennent indisponibles
+    # (Produits.est_disponible mis à False) — seul un admin peut lever cette
+    # suspension (reactiverVendeurAdmin, Registration/views.py), ce qui rend
+    # alors tous ses produits (non bannis individuellement) de nouveau
+    # disponibles. Distinct de est_bloquer : ce champ-ci ne coupe pas l'accès
+    # au compte, seulement la capacité à vendre.
+    desactive_par_signalements = models.BooleanField(default=False)
+    # incrémenté à chaque consultation du profil public d'un vendeur (voir
+    # infoVendeur, Produits/views/produitsViews.py) — alimente le graphique
+    # "vues du profil" du tableau de bord vendeur (voir statistiquesVendeur,
+    # Produits/views/produitsViews.py)
+    nombre_vues_profil = models.PositiveIntegerField(default=0)
+    # incrémenté à chaque avis de ce compte supprimé par un admin suite à un
+    # signalement (voir supprimerAvis, Produits/views/avisViews.py) — au-delà
+    # de SEUIL_AVERTISSEMENTS, le compte est bloqué automatiquement (voir
+    # ajouter_avertissement ci-dessous)
+    nombre_avertissements = models.PositiveIntegerField(default=0)
+    # posé à True par reinitialiserMotDePasseAdmin (Registration/views.py,
+    # réservé au super super admin et aux comptes "tous les droits" agissant
+    # sur un admin à droits limités — voir peut_agir_sur_admin) : le mot de
+    # passe actuel reste valable (pas d'invalidation immédiate, pas de mot de
+    # passe temporaire envoyé par email), mais la prochaine connexion réussie
+    # doit obligatoirement passer par un changement de mot de passe avant
+    # d'accéder au reste de la plateforme — voir seConnecter (inclut ce champ
+    # dans la réponse) et modifierMotDePasse (le remet à False au succès)
+    doit_changer_mot_de_passe = models.BooleanField(default=False)
+>>>>>>> Stashed changes
 
     class Meta:
         db_table            = 'utilisateur'    # nom de la table SQL
@@ -61,18 +99,62 @@ class Utilisateur(models.Model):
         return self.entreprises.exists()   # 'entreprises' = related_name du ForeignKey proprietaire de Entreprise
 
     def bloquer(self):
-        """Suspend le compte (accès admin, voir Registration/views.py::toggleBloquerUtilisateur)
-        et invalide immédiatement toute session active en supprimant ses tokens —
-        sinon un utilisateur déjà connecté garderait l'accès jusqu'à expiration
-        naturelle du token (pas de TTL ici, donc indéfiniment)."""
+        """
+        Suspend le compte (accès admin, voir Registration/views.py::
+        toggleBloquerUtilisateur) — accès RESTREINT, pas une déconnexion :
+        un compte bloqué reste connecté et peut continuer à parcourir le
+        catalogue, mais ne peut plus contacter un vendeur, consulter le
+        détail d'un produit ni le profil public d'un vendeur (voir les
+        contrôles dans Messagerie/views.py et Produits/views/produitsViews.py)
+        — sauf pour contacter un administrateur, son seul recours pour
+        demander un déblocage. Ne supprime plus les tokens (contrairement à
+        avant) : couper la session empêcherait justement ce recours.
+
+        Un vendeur bloqué perd en plus sa capacité à vendre : tous ses
+        produits déjà publiés passent indisponibles (sauvegarde individuelle,
+        pas de bulk .update(), pour que chacun déclenche normalement
+        broadcast_produit et reste cohérent en temps réel sur les catalogues
+        déjà affichés — même principe que la suspension automatique dans
+        signalerVendeur, Produits/views/signalementsViews.py) et il ne peut
+        plus en publier de nouveau (voir creerProduit).
+        """
         self.est_bloquer = True
-        self.save()
-        self.tokens.all().delete()
+        self.save(update_fields=['est_bloquer'])
+
+        if self.profil.role == 'vendeur':
+            from Produits.models import Produits   # import différé : évite un cycle Registration <-> Produits
+            for produit in Produits.objects.filter(vendeur=self, est_disponible=True):
+                produit.est_disponible = False
+                produit.save(update_fields=['est_disponible'])
 
     def debloquer(self):
-        """Réactive un compte suspendu (accès admin)."""
+        """
+        Lève le blocage (accès admin). Ne réactive PAS automatiquement les
+        produits d'un vendeur laissés indisponibles par bloquer() ci-dessus :
+        c'est au vendeur de les rendre disponibles lui-même, un par un, une
+        fois débloqué — même règle que reactiverVendeurAdmin (Registration/
+        views.py) pour la suspension automatique par signalements.
+        """
         self.est_bloquer = False
-        self.save()
+        self.save(update_fields=['est_bloquer'])
+
+    def ajouter_avertissement(self):
+        """
+        Incrémente nombre_avertissements (voir supprimerAvis, Produits/views/
+        avisViews.py — un avertissement par avis supprimé par un admin suite à
+        un signalement). Au-delà de SEUIL_AVERTISSEMENTS, bloque
+        automatiquement le compte (voir bloquer() ci-dessus). Retourne True si
+        ce dépassement de seuil vient de déclencher le blocage (pour que
+        l'appelant sache s'il doit prévenir l'utilisateur du blocage en plus
+        de l'avertissement), False sinon.
+        """
+        self.nombre_avertissements += 1
+        self.save(update_fields=['nombre_avertissements'])
+
+        if self.nombre_avertissements >= SEUIL_AVERTISSEMENTS and not self.est_bloquer:
+            self.bloquer()
+            return True
+        return False
 
 
 # ── MODÈLE VENDEUR ────────────────────────────────────────────────────────────
@@ -549,3 +631,306 @@ class Token(models.Model):
 
     def __str__(self):
         return f"Token de {self.utilisateur.email}"
+<<<<<<< Updated upstream
+=======
+
+
+# ── MODÈLE CLÉ DE CHIFFREMENT (messagerie de bout en bout) ───────────────────
+class CleChiffrementUtilisateur(models.Model):
+    """
+    Matériel de chiffrement de bout en bout de la messagerie (ECDH P-256, voir
+    Messagerie/models.py::Message.chiffre et MessageSupport).
+
+    cle_publique n'est par définition pas secrète, stockée en clair.
+
+    La clé privée, elle, n'est JAMAIS transmise ni stockée en clair. Une
+    copie CHIFFRÉE en est néanmoins sauvegardée ici (cle_privee_chiffree +
+    iv_cle_privee), pour qu'un utilisateur retrouve automatiquement sa
+    messagerie sur un nouvel appareil sans rien avoir à saisir de plus. La
+    clé d'enveloppe qui protège cette copie est dérivée via PBKDF2
+    (sel_kdf/iterations_kdf) d'un secret que seul l'utilisateur peut fournir
+    et que le serveur ne stocke jamais :
+      - compte classique : le mot de passe du compte ;
+      - compte connecté uniquement via Google : le "sub" Google (identifiant
+        stable du compte, non affiché publiquement — voir google_connection/
+        google_inscription ci-dessus), transmis une seule fois à la
+        connexion et jamais persisté, faute de mot de passe connu.
+    Dans les deux cas, ce secret est déjà obtenu par le simple fait de se
+    connecter : aucune saisie supplémentaire n'est nécessaire (voir
+    src/utils/e2eCrypto.js::deriverCleEnveloppe et
+    src/api/e2eStore.js::garantirCleE2E). Le serveur ne voit donc jamais la
+    clé privée en clair, seulement un blob qu'il est incapable de déchiffrer
+    lui-même.
+
+    En cas de mot de passe oublié réinitialisé par code (l'ancien mot de
+    passe n'est alors jamais connu, donc impossible de re-envelopper la clé
+    existante) : cette ligne est supprimée par reinitialiserMotDePasse et une
+    nouvelle paire de clés est régénérée automatiquement à la prochaine
+    connexion. En cas de changement de mot de passe classique (l'ancien ET
+    le nouveau sont connus), la clé privée est simplement ré-enveloppée avec
+    le nouveau mot de passe dans la même requête (voir modifierMotDePasse),
+    sans rien perdre.
+    """
+
+    utilisateur = models.OneToOneField(
+                    Utilisateur,
+                    on_delete    = models.CASCADE,
+                    related_name = 'cle_chiffrement'
+                  )
+
+    cle_publique = models.TextField()   # JWK JSON de la clé publique ECDH
+
+    # copie de secours de la clé privée (JWK JSON), chiffrée en AES-GCM avec
+    # une clé dérivée du mot de passe (ou du sub Google) du compte — reste
+    # nul tant qu'aucun appareil n'a encore synchronisé sa sauvegarde
+    cle_privee_chiffree = models.TextField(blank=True, null=True)
+    iv_cle_privee       = models.CharField(max_length=64, blank=True, null=True)
+    sel_kdf             = models.CharField(max_length=64, blank=True, null=True)
+    iterations_kdf      = models.PositiveIntegerField(blank=True, null=True)
+
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_maj      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table            = 'cle_chiffrement_utilisateur'
+        verbose_name        = 'Clé de chiffrement'
+        verbose_name_plural = 'Clés de chiffrement'
+
+    def __str__(self):
+        return f"Clé de chiffrement de {self.utilisateur.email}"
+
+
+# ── MODÈLE DROITS ADMIN ────────────────────────────────────────────────────────
+class DroitsAdmin(models.Model):
+    """
+    Droits granulaires d'un compte administrateur (Profil.role == 'admin').
+    Un compte admin sans DroitsAdmin n'a aucun droit — un admin n'a donc accès
+    à une fonctionnalité que si ce droit lui a été explicitement attribué (ou
+    si super_admin est vrai, qui les implique tous). Voir verifier_droit_admin
+    ci-dessous, utilisé par toutes les vues admin de tout le backend
+    (Registration/Produits/Messagerie), et enregistrer_audit qui journalise
+    chaque action mutante effectuée grâce à un de ces droits (voir JournalAudit).
+    """
+
+    utilisateur = models.OneToOneField(
+                    Utilisateur,
+                    on_delete    = models.CASCADE,
+                    related_name = 'droits_admin'
+                  )
+
+    # implique TOUS les droits ci-dessous, et donne accès à la gestion des
+    # autres admins (créer, modifier leurs droits, bloquer, révoquer, réinitialiser
+    # leur mot de passe — voir listerAdmins/creerAdmin/promouvoirAdmin/
+    # modifierDroitsAdmin/revoquerAdmin/reinitialiserMotDePasseAdmin,
+    # Registration/views.py). Affiché "Tous les droits" côté frontend (pas
+    # "Super admin" — ce libellé est réservé à est_super_super_admin
+    # ci-dessous). Un compte "Tous les droits" ne peut PAS agir (modifier ses
+    # droits, bloquer, révoquer, réinitialiser le mot de passe) sur lui-même
+    # NI sur un autre compte "Tous les droits" — seulement sur un admin à
+    # droits limités. Voir peut_agir_sur_admin ci-dessous, qui encode cette
+    # hiérarchie et est appelée par toutes les vues de gestion des admins.
+    super_admin = models.BooleanField(default=False)
+
+    # UNIQUE sur toute la plateforme, jamais attribuable via l'API (ni à la
+    # création, ni via modifierDroitsAdmin — voir _appliquer_droits qui ne
+    # touche jamais ce champ), posé UNIQUEMENT par le bootstrap du tout
+    # premier compte (voir Registration/signals.py::creer_profil). Rend ce
+    # compte intouchable : personne — pas même un autre compte "Tous les
+    # droits" — ne peut le bloquer, le révoquer, modifier ses droits ou
+    # réinitialiser son mot de passe (voir peut_agir_sur_admin). En
+    # contrepartie, LUI seul peut effectuer ces actions sur N'IMPORTE QUEL
+    # autre admin, y compris un autre compte "Tous les droits".
+    est_super_super_admin = models.BooleanField(default=False)
+
+    # bloquer/débloquer/supprimer un compte, réactiver un vendeur suspendu
+    # par signalements (voir toggleBloquerUtilisateur/supprimerUtilisateurAdmin/
+    # reactiverVendeurAdmin, Registration/views.py)
+    gestion_utilisateurs = models.BooleanField(default=False)
+
+    # traiter les signalements (produits, vendeurs, messages, avis),
+    # désactiver/réactiver un produit signalé, supprimer un message/avis signalé
+    gestion_signalements = models.BooleanField(default=False)
+
+    # lister les demandes de vérification KYC en attente (l'approbation/rejet
+    # reste pour l'instant réservée à Django admin, hors API — voir
+    # Registration/admin.py::DemandeVerificationAdmin)
+    gestion_verifications = models.BooleanField(default=False)
+
+    # créer/modifier/supprimer catégories et sous-catégories de produits
+    gestion_categories = models.BooleanField(default=False)
+
+    # répondre aux messages support (vendeur/acheteur → admins, voir
+    # Messagerie/views.py::repondreMessageAdmin)
+    gestion_support = models.BooleanField(default=False)
+
+    # configurer/déclencher les sauvegardes, consulter et télécharger
+    # l'historique (voir Sauvegarde/views.py) — la RESTAURATION d'un backup
+    # est volontairement plus stricte et exige super_admin, pas seulement ce
+    # droit (action la plus destructrice du système, voir restaurer_analyser/
+    # restaurer_confirmer, Sauvegarde/views.py)
+    gestion_sauvegardes = models.BooleanField(default=False)
+
+    # réinitialiser le mot de passe d'un AUTRE admin (voir
+    # reinitialiserMotDePasseAdmin, Registration/views.py) — un compte "Tous
+    # les droits" peut attribuer ce droit précis à un admin à droits limités
+    # (délégation descendante), mais un admin qui ne possède QUE ce droit ne
+    # peut réinitialiser le mot de passe que d'un autre admin à droits
+    # limités, jamais celui d'un compte "Tous les droits" ni du super super
+    # admin (même hiérarchie que gestion_utilisateurs pour bloquer/révoquer,
+    # voir peut_agir_sur_admin)
+    gestion_mots_de_passe = models.BooleanField(default=False)
+
+    # traçabilité : qui a attribué/modifié ces droits en dernier
+    attribue_par = models.ForeignKey(
+                     Utilisateur, on_delete=models.SET_NULL, null=True, blank=True,
+                     related_name='droits_attribues'
+                   )
+    date_creation = models.DateTimeField(auto_now_add=True)
+    date_maj      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table            = 'droits_admin'
+        verbose_name        = 'Droits admin'
+        verbose_name_plural = 'Droits admin'
+
+    def __str__(self):
+        suffixe = " (super super admin)" if self.est_super_super_admin else " (tous les droits)" if self.super_admin else ""
+        return f"Droits de {self.utilisateur.email}" + suffixe
+
+    def a_droit(self, nom_droit):
+        """True si super super admin, super_admin ("tous les droits" — implique
+        les deux), ou si le droit précis (par son nom de champ) est accordé."""
+        return self.est_super_super_admin or self.super_admin or bool(getattr(self, nom_droit, False))
+
+
+def verifier_droit_admin(utilisateur, droit):
+    """
+    True si `utilisateur` est un compte admin ET possède le droit demandé
+    (directement, ou via super_admin). Utilisé à la place de la simple
+    vérification `role == 'admin'` dans toutes les vues admin du backend —
+    voir le tableau de correspondance vue → droit dans Registration/views.py
+    et les fichiers équivalents de Produits/Messagerie. Défini ici (pas dans
+    views.py) pour éviter les imports circulaires, même raison que
+    haser_password/verifier_password ci-dessus — importable directement
+    depuis Produits/Messagerie, qui importent déjà Registration.models.
+    """
+    if not utilisateur or utilisateur.profil.role != 'admin':
+        return False
+    droits = getattr(utilisateur, 'droits_admin', None)
+    return bool(droits) and droits.a_droit(droit)
+
+
+def peut_agir_sur_admin(acteur, cible):
+    """
+    True si `acteur` (un compte admin) est autorisé à bloquer/révoquer/
+    modifier les droits/réinitialiser le mot de passe de `cible` (un autre
+    compte admin). Hiérarchie, du plus au moins large :
+      - le super super admin (unique, voir DroitsAdmin.est_super_super_admin)
+        peut agir sur n'importe quel autre admin, y compris un compte "Tous
+        les droits" ;
+      - personne — pas même un autre super super admin, puisqu'il n'en existe
+        qu'un seul — ne peut agir sur LE super super admin : intouchable ;
+      - un compte "Tous les droits" (super_admin) peut agir sur un admin à
+        droits limités, mais jamais sur un autre compte "Tous les droits" ;
+      - un admin à droits limités ne peut jamais agir sur un autre admin via
+        cette fonction (l'appelant doit de toute façon déjà avoir vérifié un
+        droit de gestion précis — gestion_utilisateurs, gestion_mots_de_passe...
+        — avant même d'arriver ici).
+    L'action sur SOI-MÊME est toujours refusée par l'appelant AVANT d'appeler
+    cette fonction (règle universelle, indépendante des droits, vérifiée
+    séparément dans chaque vue — voir toggleBloquerUtilisateur/revoquerAdmin/
+    modifierDroitsAdmin/reinitialiserMotDePasseAdmin, Registration/views.py).
+    """
+    droits_acteur = getattr(acteur, 'droits_admin', None)
+    droits_cible  = getattr(cible, 'droits_admin', None)
+    if not droits_acteur or not droits_cible:
+        return False
+    if droits_cible.est_super_super_admin:
+        return False
+    if droits_acteur.est_super_super_admin:
+        return True
+    if droits_cible.super_admin:
+        return False
+    return droits_acteur.super_admin
+
+
+def peut_reinitialiser_mdp(acteur, cible):
+    """
+    Hiérarchie SPÉCIFIQUE à la réinitialisation de mot de passe (voir
+    reinitialiserMotDePasseAdmin, Registration/views.py) — plus permissive
+    que peut_agir_sur_admin ci-dessus pour la partie "droits limités" :
+      - le super super admin peut agir sur tout le monde ;
+      - personne ne peut agir sur le super super admin ;
+      - un compte "Tous les droits" peut agir sur n'importe quel admin à
+        droits limités (mais jamais sur un autre compte "Tous les droits") ;
+      - un admin à droits limités qui possède le droit gestion_mots_de_passe
+        peut réinitialiser le mot de passe d'un AUTRE admin à droits
+        limités — SAUF si celui-ci possède lui aussi gestion_mots_de_passe
+        (règle explicite : deux comptes avec le même droit délégué ne
+        peuvent pas agir l'un sur l'autre).
+    """
+    droits_acteur = getattr(acteur, 'droits_admin', None)
+    droits_cible  = getattr(cible, 'droits_admin', None)
+    if not droits_acteur or not droits_cible:
+        return False
+    if droits_cible.est_super_super_admin:
+        return False
+    if droits_acteur.est_super_super_admin:
+        return True
+    if droits_cible.super_admin:
+        return False
+    if droits_acteur.super_admin:
+        return True
+    return bool(droits_acteur.gestion_mots_de_passe) and not droits_cible.gestion_mots_de_passe
+
+
+# ── MODÈLE JOURNAL D'AUDIT ────────────────────────────────────────────────────
+class JournalAudit(models.Model):
+    """
+    Trace de chaque action mutante effectuée par un compte admin (qui, quoi,
+    quand) — voir enregistrer_audit ci-dessous, appelée après chaque action
+    admin qui modifie des données (pas les simples listes en lecture). Sert
+    de source au rapport PDF (voir Registration/services/audit_rapport_service.py
+    et genererRapportAudit, Registration/views.py).
+    """
+
+    # SET_NULL (pas CASCADE) : un admin supprimé ne doit pas faire disparaître
+    # la trace de ce qu'il a fait — nom_admin_snapshot garde le nom lisible
+    # même après suppression ou changement de nom du compte
+    admin = models.ForeignKey(
+              Utilisateur, on_delete=models.SET_NULL, null=True, blank=True,
+              related_name='actions_audit'
+            )
+    nom_admin_snapshot = models.CharField(max_length=200)
+
+    # code court identifiant le type d'action (ex. "utilisateur.bloquer",
+    # "signalement.traiter") — sert de clé de traduction côté frontend pour
+    # le libellé du rapport
+    action      = models.CharField(max_length=100)
+    description = models.TextField()   # phrase lisible avec les détails de l'action
+
+    date_action = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table            = 'journal_audit'
+        verbose_name        = "Entrée d'audit"
+        verbose_name_plural = "Journal d'audit"
+        ordering            = ['-date_action']
+        indexes             = [
+            models.Index(fields=['date_action', 'admin']),
+        ]
+
+    def __str__(self):
+        return f"{self.nom_admin_snapshot} — {self.action} — {self.date_action:%Y-%m-%d %H:%M}"
+
+
+def enregistrer_audit(utilisateur, action, description):
+    """Journalise une action admin — voir JournalAudit ci-dessus. À appeler
+    après le succès d'une action mutante (jamais sur un simple GET/liste)."""
+    JournalAudit.objects.create(
+        admin=utilisateur,
+        nom_admin_snapshot=f"{utilisateur.prenom} {utilisateur.nom}",
+        action=action,
+        description=description,
+    )
+>>>>>>> Stashed changes

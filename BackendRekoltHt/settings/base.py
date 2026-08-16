@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     'Produits',
     'Registration',
     'Messagerie',
+    'Sauvegarde',
     'social_django',
 ]
 # ne pas toucher
@@ -184,6 +185,41 @@ EMAIL_USE_TLS       = os.getenv('EMAIL_USE_TLS') == 'True'
 EMAIL_HOST_USER     = os.getenv('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL  = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER)
+
+# ── reCAPTCHA ──────────────────────────────────────────────────────────────────
+# clé secrète de vérification côté serveur (voir Registration/views.py::
+# _verifier_recaptcha, utilisée par creerAdmin) — distincte de la clé de site
+# publique VITE_RECAPTCHA_KEY côté frontend. Si absente, la vérification est
+# ignorée (dev sans clé) plutôt que de bloquer toute création de compte admin.
+RECAPTCHA_SECRET_KEY = os.getenv('RECAPTCHA_SECRET_KEY')
+
+
+# ── SAUVEGARDES (voir Sauvegarde/) ────────────────────────────────────────────
+# clé maître de chiffrement des fichiers .rhtbackup (Fernet, voir
+# Sauvegarde/services/chiffrement_service.py) — dédiée, indépendante de
+# SECRET_KEY et de tout mot de passe utilisateur, pour qu'un backup reste
+# restaurable même si les comptes admin changent. Générée une fois via
+# Fernet.generate_key() et collée dans .env/.env.dev, jamais en base.
+BACKUP_MASTER_KEY = os.getenv('BACKUP_MASTER_KEY')
+
+# dossier de stockage des sauvegardes "locales" — même avertissement que
+# MEDIA_ROOT ci-dessous : sur un hébergeur au système de fichiers éphémère
+# (ex. Render), ce dossier ne survit pas à un redéploiement ; la destination
+# "locale" n'est fiable qu'en auto-hébergement ou en développement, sinon
+# préférer la destination "google_drive"
+SAUVEGARDE_ROOT = BASE_DIR / 'sauvegardes'
+
+# identifiants OAuth2 dédiés à l'upload Google Drive (scope drive.file
+# uniquement — l'app ne voit que les fichiers qu'elle crée elle-même), voir
+# Sauvegarde/services/google_drive_service.py. Distincts de
+# SOCIAL_AUTH_GOOGLE_OAUTH2_KEY/SECRET (connexion des utilisateurs) même s'ils
+# peuvent techniquement provenir du même projet Google Cloud.
+GOOGLE_DRIVE_CLIENT_ID     = os.getenv('GOOGLE_DRIVE_CLIENT_ID')
+GOOGLE_DRIVE_CLIENT_SECRET = os.getenv('GOOGLE_DRIVE_CLIENT_SECRET')
+GOOGLE_DRIVE_REDIRECT_URI  = os.getenv('GOOGLE_DRIVE_REDIRECT_URI')
+# URL du frontend vers laquelle rediriger une fois le consentement Google
+# Drive terminé (voir Sauvegarde/views.py::google_callback)
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 
 
 # ── VÉRIFICATION FACIALE (DeepFace, environnement Python dédié) ──────────────

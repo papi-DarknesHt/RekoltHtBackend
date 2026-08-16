@@ -3,6 +3,7 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from Registration.models import verifier_droit_admin, enregistrer_audit
 from ..models import Categories, sousCategories
 from ._auth import _get_user_from_token
 
@@ -44,8 +45,13 @@ def creerSousCategorie(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
+<<<<<<< Updated upstream
     if utilisateur.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+=======
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
+>>>>>>> Stashed changes
 
     try:
         data = json.loads(request.body)
@@ -62,6 +68,7 @@ def creerSousCategorie(request):
         return JsonResponse({'error': 'Catégorie introuvable'}, status=404)
 
     sous_categorie = sousCategories.objects.create(categorie=categorie, nom=data['nom'])
+    enregistrer_audit(utilisateur, 'sous_categorie.creer', f"A créé la sous-catégorie « {sous_categorie.nom} » (id {sous_categorie.id})")
 
     return JsonResponse({
         'message':        'Sous-catégorie créée avec succès',
@@ -80,8 +87,13 @@ def modifierSousCategorie(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
+<<<<<<< Updated upstream
     if utilisateur.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+=======
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
+>>>>>>> Stashed changes
 
     try:
         data = json.loads(request.body)
@@ -106,6 +118,7 @@ def modifierSousCategorie(request):
         sous_categorie.nom = data['nom']
 
     sous_categorie.save()
+    enregistrer_audit(utilisateur, 'sous_categorie.modifier', f"A modifié la sous-catégorie « {sous_categorie.nom} » (id {sous_categorie.id})")
 
     return JsonResponse({
         'message':        'Sous-catégorie mise à jour avec succès',
@@ -124,8 +137,13 @@ def supprimerSousCategorie(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
+<<<<<<< Updated upstream
     if utilisateur.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+=======
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
+>>>>>>> Stashed changes
 
     try:
         data = json.loads(request.body)
@@ -140,6 +158,8 @@ def supprimerSousCategorie(request):
     except sousCategories.DoesNotExist:
         return JsonResponse({'error': 'Sous-catégorie introuvable'}, status=404)
 
+    nom_sous_categorie = sous_categorie.nom
     sous_categorie.delete()
+    enregistrer_audit(utilisateur, 'sous_categorie.supprimer', f"A supprimé la sous-catégorie « {nom_sous_categorie} »")
 
     return JsonResponse({'message': 'Sous-catégorie supprimée avec succès'}, status=200)

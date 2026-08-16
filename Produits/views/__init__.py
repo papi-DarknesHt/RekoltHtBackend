@@ -17,10 +17,17 @@ from .produitsViews import (
     contacterProduit,
     infoVendeur,
     historiqueContactsVendeur,
+<<<<<<< Updated upstream
+=======
+    reactiverProduitAdmin,
+    desactiverProduitAdmin,
+    statistiquesVendeurPdf,
+>>>>>>> Stashed changes
 )
 from .photoProduits import (
     ajouterPhotosProduit,
     listerPhotosProduit,
+    reordonnerPhotosProduit,
     supprimerPhotoProduit,
 )
 from .sousCategoriesViews import (

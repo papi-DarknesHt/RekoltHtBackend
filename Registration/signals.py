@@ -1,7 +1,7 @@
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from Api.broadcast import broadcast
-from .models import Utilisateur, Entreprise, Profil, DemandeVerification
+from .models import Utilisateur, Entreprise, Profil, DemandeVerification, DroitsAdmin
 
 
 # ── CRÉER LE PROFIL AUTOMATIQUEMENT ──────────────────────────────────────────
@@ -21,12 +21,29 @@ def creer_profil(sender, instance, created, **kwargs):
     base avant celui-ci) devient automatiquement 'admin' — sans ça, personne
     n'aurait accès au dashboard admin/à la gestion des catégories sur une
     instance fraîchement déployée, faute d'un moyen de promouvoir un compte
-    autrement que par un admin déjà existant.
+    autrement que par un admin déjà existant. Ce même compte reçoit aussi
+    d'office TOUS les droits ET est_super_super_admin (voir DroitsAdmin,
+    peut_agir_sur_admin) : c'est le SEUL moyen par lequel un compte devient
+    super super admin sur toute la plateforme — jamais via l'API (voir
+    _appliquer_droits, Registration/views.py, qui ne touche jamais ce champ).
     """
     if not created:
         return
-    role = 'admin' if Utilisateur.objects.count() == 1 else 'acheteur'
+    est_premier_compte = Utilisateur.objects.count() == 1
+    role = 'admin' if est_premier_compte else 'acheteur'
     Profil.objects.create(utilisateur=instance, role=role)
+    if est_premier_compte:
+        DroitsAdmin.objects.create(
+            utilisateur=instance,
+            super_admin=True,
+            est_super_super_admin=True,
+            gestion_utilisateurs=True,
+            gestion_signalements=True,
+            gestion_categories=True,
+            gestion_support=True,
+            gestion_sauvegardes=True,
+            gestion_mots_de_passe=True,
+        )
 
 
 # ── BROADCAST WEBSOCKET — NOUVEL UTILISATEUR ─────────────────────────────────

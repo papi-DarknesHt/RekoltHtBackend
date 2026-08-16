@@ -3,6 +3,7 @@ import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from Registration.models import verifier_droit_admin, enregistrer_audit
 from ..models import Produits, Categories, sousCategories, ContactProduit
 from ._auth import _get_user_from_token
 from .categoriesViews import _serialiseCategorie
@@ -67,6 +68,16 @@ def creerProduit(request):
 
     if utilisateur.profil.role != 'vendeur':
         return JsonResponse({'error': "Accès réservé aux vendeurs"}, status=403)
+
+    # compte bloqué par un admin (voir Utilisateur.bloquer, Registration/models.py)
+    # — distinct de desactive_par_signalements ci-dessus, mais même conséquence
+    # côté publication : plus de nouveau produit tant que le blocage n'est pas levé
+    if utilisateur.est_bloquer:
+        return JsonResponse({
+            'error': "Votre compte a été bloqué ; vous ne pouvez plus publier de nouveau produit. "
+                     "Contactez un administrateur pour demander un déblocage.",
+            'error_code': 'COMPTE_BLOQUE',
+        }, status=403)
 
     # choix des catégories obligatoire après validation KYC (voir
     # Profil.a_choisi_categories, Registration/models.py et
@@ -180,9 +191,23 @@ def listerProduits(request):
 # ── DÉTAIL D'UN PRODUIT (public) ──────────────────────────────────────────────
 @csrf_exempt
 def detailProduit(request):
-    """Retourne le détail d'un produit par son id (public)."""
+    """
+    Retourne le détail d'un produit par son id — public, ne nécessite pas de
+    connexion. Un compte connecté ET bloqué (voir Utilisateur.bloquer,
+    Registration/models.py) ne peut en revanche plus consulter le détail
+    d'un produit d'un autre vendeur : un visiteur anonyme ou un compte non
+    bloqué ne sont pas concernés par ce contrôle.
+    """
     if request.method != 'GET':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if utilisateur and utilisateur.est_bloquer:
+        return JsonResponse({
+            'error': "Votre compte a été bloqué ; vous ne pouvez plus consulter le détail des produits. "
+                     "Contactez un administrateur pour demander un déblocage.",
+            'error_code': 'COMPTE_BLOQUE',
+        }, status=403)
 
     produit_id = request.GET.get('id')
     if not produit_id:
@@ -214,6 +239,53 @@ def mesProduits(request):
     }, status=200)
 
 
+<<<<<<< Updated upstream
+=======
+# ── RAPPORT STATISTIQUE PDF (vendeur connecté) ────────────────────────────────
+@csrf_exempt
+def statistiquesVendeurPdf(request):
+    """
+    Génère et retourne (binaire, réponse directe — pas de JSON) le rapport
+    statistique PDF du vendeur connecté : résumé chiffré, produits les plus
+    consultés/contactés, détail par produit (voir Produits/services/
+    rapport_service.py). Accessible depuis le tableau de bord vendeur
+    (TableauDeBordVendeur.jsx), même mécanisme de téléchargement binaire que
+    previsualiser_contrat (Registration/views.py).
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if utilisateur.profil.role != 'vendeur':
+        return JsonResponse({'error': "Accès réservé aux vendeurs", 'error_code': 'VENDEUR_ONLY'}, status=403)
+
+    from django.http import HttpResponse
+    from django.utils import timezone
+    from ..services.rapport_service import generer_rapport_vendeur
+
+    produits = Produits.objects.filter(vendeur=utilisateur)
+
+    pdf = generer_rapport_vendeur(
+        vendeur=utilisateur,
+        nom_affiche=_nomVendeur(utilisateur),
+        produits=produits,
+        nombre_vues_profil=utilisateur.nombre_vues_profil,
+    )
+
+    # "RekoltHT-Report-2026-08-06-14h32.pdf" — le frontend fixe déjà ce nom au
+    # moment du téléchargement (voir TableauDeBordVendeur.jsx::nomFichierRapport),
+    # ce en-tête ne sert qu'en repli si le PDF est ouvert par un autre biais
+    # qu'un clic sur "Télécharger le rapport" (lien direct, nouvel onglet...).
+    nom_fichier = f"RekoltHT-Report-{timezone.localtime().strftime('%Y-%m-%d-%Hh%M')}.pdf"
+    reponse = HttpResponse(pdf.read(), content_type='application/pdf')
+    reponse['Content-Disposition'] = f'attachment; filename="{nom_fichier}"'
+    return reponse
+
+
+>>>>>>> Stashed changes
 # ── CONTACTER UN VENDEUR POUR UN PRODUIT (public) ─────────────────────────────
 @csrf_exempt
 def contacterProduit(request):
@@ -382,6 +454,97 @@ def toggleDisponibiliteProduit(request):
     }, status=200)
 
 
+<<<<<<< Updated upstream
+=======
+# ── RÉACTIVER UN PRODUIT DÉSACTIVÉ PAR SIGNALEMENTS (admin) ──────────────────
+@csrf_exempt
+def reactiverProduitAdmin(request):
+    """
+    Lève la désactivation automatique déclenchée par 5 signalements (voir
+    signalerProduit, Produits/views/signalementsViews.py) — réservé aux
+    administrateurs, c'est le seul moyen de rendre un tel produit à nouveau
+    visible (le vendeur en est empêché, voir modifierProduit/
+    toggleDisponibiliteProduit ci-dessus).
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(utilisateur, 'gestion_signalements'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_signalements'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    try:
+        produit = Produits.objects.get(id=data['id'])
+    except Produits.DoesNotExist:
+        return JsonResponse({'error': 'Produit introuvable', 'error_code': 'PRODUCT_NOT_FOUND'}, status=404)
+
+    produit.est_disponible = True
+    produit.desactive_par_signalements = False
+    produit.save(update_fields=['est_disponible', 'desactive_par_signalements'])
+    enregistrer_audit(utilisateur, 'produit.reactiver', f"A réactivé le produit « {produit.nom} » (id {produit.id})")
+
+    return JsonResponse({
+        'message': 'Produit réactivé avec succès',
+        'produit': _serialiseProduit(produit, request),
+    }, status=200)
+
+
+# ── ADMIN — DÉSACTIVER UN PRODUIT SIGNALÉ ─────────────────────────────────────
+@csrf_exempt
+def desactiverProduitAdmin(request):
+    """
+    Rend un produit indisponible suite à un signalement — action manuelle
+    décidée par un admin depuis la file des signalements (contrairement à la
+    désactivation automatique au 5e signalement dans signalerProduit,
+    Produits/views/signalementsViews.py). N'affecte pas
+    desactive_par_signalements (réservé au seuil automatique) : reactiverProduitAdmin
+    ci-dessus sert aussi à lever cette désactivation manuelle.
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(utilisateur, 'gestion_signalements'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_signalements'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    try:
+        produit = Produits.objects.get(id=data['id'])
+    except Produits.DoesNotExist:
+        return JsonResponse({'error': 'Produit introuvable', 'error_code': 'PRODUCT_NOT_FOUND'}, status=404)
+
+    produit.est_disponible = False
+    produit.save(update_fields=['est_disponible'])
+    enregistrer_audit(utilisateur, 'produit.desactiver', f"A désactivé le produit « {produit.nom} » (id {produit.id})")
+
+    return JsonResponse({
+        'message': 'Produit désactivé avec succès',
+        'produit': _serialiseProduit(produit, request),
+    }, status=200)
+
+
+>>>>>>> Stashed changes
 # ── SUPPRIMER UN PRODUIT (propriétaire) ───────────────────────────────────────
 @csrf_exempt
 def supprimerProduit(request):
@@ -428,9 +591,22 @@ def infoVendeur(request):
     "Appeler" (lien tel:) de DetailProduit.jsx ; contrairement à l'email, ce
     n'est pas une donnée d'authentification, et un vendeur agricole compte
     généralement sur l'appel direct comme canal de contact principal.
+
+    Public — un compte connecté ET bloqué (voir Utilisateur.bloquer,
+    Registration/models.py) ne peut en revanche plus consulter le profil
+    d'un vendeur ; un visiteur anonyme ou un compte non bloqué ne sont pas
+    concernés par ce contrôle.
     """
     if request.method != 'GET':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if utilisateur and utilisateur.est_bloquer:
+        return JsonResponse({
+            'error': "Votre compte a été bloqué ; vous ne pouvez plus consulter le profil d'un vendeur. "
+                     "Contactez un administrateur pour demander un déblocage.",
+            'error_code': 'COMPTE_BLOQUE',
+        }, status=403)
 
     vendeur_id = request.GET.get('vendeur_id')
     if not vendeur_id:
@@ -473,3 +649,61 @@ def infoVendeur(request):
             'nombre_produits':  nombre_produits,
         },
     }, status=200)
+<<<<<<< Updated upstream
+=======
+
+
+# ── VENDEURS À AFFICHER SUR LA CARTE (public) ─────────────────────────────────
+@csrf_exempt
+def listerVendeursCarte(request):
+    """
+    Vendeurs ayant au moins un produit disponible ET une position GPS connue
+    (profil individuel ou entreprise selon le type de compte) — alimente le
+    marqueur "vendeurs" de la carte d'accueil (voir MapHaiti.jsx). Position
+    exacte (pas d'arrondi) : c'est la même précision que celle déjà utilisée
+    pour le lien "Appeler"/le bouton WhatsApp sur la fiche produit.
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    from Registration.models import Utilisateur, Entreprise
+
+    vendeur_ids = (
+        Produits.objects.filter(est_disponible=True)
+        .values_list('vendeur_id', flat=True)
+        .distinct()
+    )
+
+    vendeurs = []
+    for vendeur in Utilisateur.objects.filter(id__in=vendeur_ids).select_related('profil'):
+        entreprise = Entreprise.objects.filter(pk=vendeur.id).first()
+        source = entreprise if entreprise else vendeur.profil
+
+        if source.latitude is None or source.longitude is None:
+            continue   # pas de position connue — ne peut pas être placé sur la carte
+
+        nom = entreprise.nom_Entreprise if entreprise else f"{vendeur.prenom} {vendeur.nom}"
+        commune = source.commune
+        departement = source.departement
+        section_communale = source.section_communale
+        # logo d'entreprise ou photo de profil individuelle — affiché comme
+        # icône de marqueur sur la carte d'accueil (voir MapHaiti.jsx), avec
+        # repli sur le logo du site côté frontend si aucune des deux n'existe
+        fichier_photo = entreprise.logo if entreprise else vendeur.profil.photo_profil
+        photo = request.build_absolute_uri(fichier_photo.url) if fichier_photo else None
+
+        vendeurs.append({
+            'vendeur_id':      vendeur.id,
+            'nom':             nom,
+            'photo':           photo,
+            'est_entreprise':  entreprise is not None,
+            'latitude':        source.latitude,
+            'longitude':       source.longitude,
+            'commune':         commune,
+            'departement':     departement,
+            'section_communale': section_communale,
+            'nombre_produits': Produits.objects.filter(vendeur=vendeur, est_disponible=True).count(),
+        })
+
+    return JsonResponse({'vendeurs': vendeurs}, status=200)
+>>>>>>> Stashed changes

@@ -23,6 +23,16 @@ from .models import (
     DemandeVerification,    # dossier de vérification KYC (individuel ou entreprise)
     CodeReinitialisation,   # code PIN à 4 chiffres, durée de vie 15 minutes
     Token,                  # token de session persisté en base (single-session)
+<<<<<<< Updated upstream
+=======
+    CleChiffrementUtilisateur,  # matériel de clé ECDH pour la messagerie de bout en bout
+    DroitsAdmin,             # droits granulaires d'un compte admin
+    JournalAudit,            # trace de chaque action mutante effectuée par un admin
+    verifier_droit_admin,    # remplace `role == 'admin'` : vérifie un droit précis (ou super_admin)
+    peut_agir_sur_admin,     # hiérarchie entre comptes admin (super super admin / "tous les droits" / droits limités)
+    peut_reinitialiser_mdp,  # hiérarchie spécifique à la réinitialisation de mot de passe (délégation entre pairs)
+    enregistrer_audit,       # journalise une action admin réussie
+>>>>>>> Stashed changes
     haser_password,         # hash SHA-256 avec sel aléatoire
     verifier_password,      # vérifie un mot de passe en clair contre son hash
 )
@@ -59,6 +69,7 @@ def google_connection(request):
 
         google_data = google_response.json()
         email       = google_data.get('email')
+        google_sub  = google_data.get('sub')   # identifiant stable du compte Google, voir plus bas
 
         if not email:
             return JsonResponse({'error': 'Email Google non disponible'}, status=400)
@@ -72,10 +83,10 @@ def google_connection(request):
                 'error': 'Kont sa a pa egziste. Tanpri enskri dabò.'
             }, status=404)
 
-        # compte suspendu par un admin — même contrôle que seConnecter, sinon le
-        # blocage serait contournable via la connexion Google
-        if utilisateur.est_bloquer:
-            return JsonResponse({'error': "Ce compte a été bloqué par un administrateur"}, status=403)
+        # un compte bloqué peut se connecter normalement — le blocage restreint
+        # certaines actions (voir Utilisateur.bloquer, Registration/models.py)
+        # mais n'empêche plus l'accès : couper la connexion empêcherait
+        # justement son seul recours, contacter un administrateur
 
         # marquer l'utilisateur comme en ligne (est_actif = indicateur de présence)
         if not utilisateur.est_actif:
@@ -91,6 +102,12 @@ def google_connection(request):
             'message':     'Koneksyon reyisi via Google',
             'token':       token,
             'utilisateur': _serialiseUtilisateur(utilisateur),
+            # transmis une seule fois, jamais stocké côté serveur : sert de
+            # matériau (à la place du mot de passe, qui n'existe pas pour un
+            # compte Google) pour dériver automatiquement la clé qui protège
+            # la sauvegarde de la clé privée E2E — voir e2eStore.js::
+            # garantirCleE2E et CleChiffrementUtilisateur (Registration/models.py)
+            'google_sub':  google_sub,
         })
 
     except Exception as e:
@@ -124,6 +141,7 @@ def google_inscription(request):
         email       = google_data.get('email')
         nom         = google_data.get('family_name',  'Inconnu')   # nom de famille Google
         prenom      = google_data.get('given_name',   'Inconnu')   # prénom Google
+        google_sub  = google_data.get('sub')   # identifiant stable du compte Google, voir plus bas
 
         if not email:
             return JsonResponse({'error': 'Email Google non disponible'}, status=400)
@@ -164,6 +182,9 @@ def google_inscription(request):
             'message':     'Enskripsyon reyisi via Google',
             'token':       token,
             'utilisateur': _serialiseUtilisateur(utilisateur),
+            # voir google_connection ci-dessus : matériau de dérivation de la
+            # clé de sauvegarde E2E, transmis une seule fois, jamais stocké
+            'google_sub':  google_sub,
         }, status=201)
 
     except Exception as e:
@@ -260,10 +281,9 @@ def seConnecter(request):
     if not verifier_password(data['mot_de_passe'], utilisateur.mot_de_passe):
         return JsonResponse({'error': "Le mot de passe n'existe pas ou incorrect"}, status=401)
 
-    # compte suspendu par un admin (voir Utilisateur.bloquer, toggleBloquerUtilisateur
-    # ci-dessous) : refuser la connexion avant même de créer un token
-    if utilisateur.est_bloquer:
-        return JsonResponse({'error': "Ce compte a été bloqué par un administrateur"}, status=403)
+    # un compte bloqué (voir Utilisateur.bloquer, toggleBloquerUtilisateur
+    # ci-dessous) peut se connecter normalement — le blocage restreint
+    # certaines actions mais n'empêche plus l'accès, voir bloquer()
 
     # marquer l'utilisateur comme en ligne
     if not utilisateur.est_actif:
@@ -339,6 +359,19 @@ def modifierUtilisateur(request):
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
+    # après vérification KYC (passage au rôle 'vendeur'), le nom/prénom sont
+    # figés : ils ont été confirmés contre une pièce d'identité officielle
+    # (voir DemandeVerification/_lancer_pipeline_ocr, Registration/services/
+    # ocr_service.py) — les laisser modifiables romprait ce lien vérifié
+    # entre le compte et l'identité de son titulaire.
+    if utilisateur.profil.role == 'vendeur':
+        for champ in ('nom', 'prenom'):
+            if champ in data and data[champ] != getattr(utilisateur, champ):
+                return JsonResponse({
+                    'error': "Le nom et le prénom ne peuvent plus être modifiés après la vérification vendeur",
+                    'error_code': 'IDENTITY_LOCKED_AFTER_VERIFICATION',
+                }, status=403)
+
     # mise à jour partielle : seuls les champs présents dans le JSON sont modifiés
     for champ in ['nom', 'prenom', 'email', 'telephone']:
         if champ in data:
@@ -374,8 +407,26 @@ def modifierProfil(request):
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
+<<<<<<< Updated upstream
     # mise à jour partielle des champs texte/numériques du profil
     for champ in ['bio', 'adresse', 'commune', 'ville', 'pays', 'role', 'latitude', 'longitude']:
+=======
+    # valeurs de localisation AVANT modification — sert seulement à savoir si
+    # une répercussion en cascade sur les produits déjà publiés est nécessaire
+    # (voir _repercuter_localisation_sur_produits plus bas) : le formulaire
+    # "Informations personnelles" (ModifierProfil.jsx) envoie toujours ces
+    # champs ensemble, même si seul un champ sans rapport (ex: la bio) a changé.
+    CHAMPS_LOCALISATION = ('departement', 'commune', 'section_communale', 'adresse', 'latitude', 'longitude')
+    avant_localisation = {champ: getattr(profil, champ) for champ in CHAMPS_LOCALISATION}
+
+    # mise à jour partielle des champs texte/numériques du profil — 'role'
+    # est volontairement exclu : un compte ne doit jamais pouvoir changer son
+    # propre rôle ici (un vendeur pourrait sinon "supprimer" son profil
+    # vendeur en repassant acheteur, et un acheteur s'auto-promouvoir admin).
+    # Les seules transitions de rôle valides passent par des flux contrôlés :
+    # DemandeVerification.marquer_verifie() (KYC) et nommerAdminUtilisateur (admin).
+    for champ in ['bio', 'adresse', 'departement', 'commune', 'section_communale', 'ville', 'pays', 'latitude', 'longitude']:
+>>>>>>> Stashed changes
         if champ in data:
             valeur = data[champ]
             if champ in ('latitude', 'longitude'):
@@ -390,6 +441,11 @@ def modifierProfil(request):
 
     profil.save()
 
+    if profil.role == 'vendeur' and any(
+        getattr(profil, champ) != avant_localisation[champ] for champ in CHAMPS_LOCALISATION
+    ):
+        _repercuter_localisation_sur_produits(utilisateur, profil)
+
     return JsonResponse({
         'message': 'Profil mis à jour avec succès',
         'profil':  _serialiseProfil(profil, request),
@@ -399,7 +455,17 @@ def modifierProfil(request):
 # ── MODIFIER LE MOT DE PASSE ──────────────────────────────────────────────────
 @csrf_exempt
 def modifierMotDePasse(request):
-    """Change le mot de passe après vérification de l'ancien."""
+    """
+    Change le mot de passe après vérification de l'ancien.
+
+    Comme l'ancien ET le nouveau mot de passe sont connus dans ce flux
+    (contrairement à reinitialiserMotDePasse), le frontend peut ré-envelopper
+    dans la foulée la sauvegarde chiffrée de la clé privée E2E sous le
+    nouveau mot de passe (voir e2eStore.js::reChiffrerPourNouveauMotDePasse)
+    et la transmettre ici via les champs optionnels cle_privee_chiffree/
+    iv_cle_privee/sel_kdf — appliquée dans la même transaction que le
+    changement de mot de passe pour ne jamais désynchroniser les deux.
+    """
     if request.method != 'PUT':
         return JsonResponse({'error': 'Méthode non autorisée'}, status=405)
 
@@ -418,8 +484,24 @@ def modifierMotDePasse(request):
     if not verifier_password(data['ancien_mot_de_passe'], utilisateur.mot_de_passe):
         return JsonResponse({'error': 'Ancien mot de passe incorrect'}, status=401)
 
-    # hash + sauvegarde via la méthode du modèle
-    utilisateur.modifier_mot_de_passe(data['nouveau_mot_de_passe'])
+    with transaction.atomic():
+        # hash + sauvegarde via la méthode du modèle
+        utilisateur.modifier_mot_de_passe(data['nouveau_mot_de_passe'])
+
+        # lève l'obligation de changement posée par reinitialiserMotDePasseAdmin
+        # (voir doit_changer_mot_de_passe, Registration/models.py) — inoffensif
+        # si elle n'était pas posée (déjà False)
+        if utilisateur.doit_changer_mot_de_passe:
+            utilisateur.doit_changer_mot_de_passe = False
+            utilisateur.save(update_fields=['doit_changer_mot_de_passe'])
+
+        if data.get('cle_privee_chiffree') and data.get('iv_cle_privee') and data.get('sel_kdf'):
+            CleChiffrementUtilisateur.objects.filter(utilisateur=utilisateur).update(
+                cle_privee_chiffree = data['cle_privee_chiffree'],
+                iv_cle_privee       = data['iv_cle_privee'],
+                sel_kdf             = data['sel_kdf'],
+                iterations_kdf      = data.get('iterations_kdf'),
+            )
 
     return JsonResponse({'message': 'Mot de passe modifié avec succès'}, status=200)
 
@@ -592,6 +674,25 @@ def modifierEntreprise(request):
     except Entreprise.DoesNotExist:
         return JsonResponse({'error': "Entreprise introuvable"}, status=404)
 
+    # une fois l'entreprise vérifiée par un admin, son nom est figé — même
+    # raison que le nom/prénom d'un compte individuel dans modifierUtilisateur
+    # ci-dessus : nom_Entreprise a été confirmé pendant la vérification (voir
+    # DemandeVerification, type_demandeur='entreprise') et est aussi affiché
+    # sur le contrat déjà généré (contrat_pdf).
+    if entreprise.est_verifiee and 'nom_Entreprise' in data and data['nom_Entreprise'] != entreprise.nom_Entreprise:
+        return JsonResponse({
+            'error': "Le nom de l'entreprise ne peut plus être modifié après la vérification",
+            'error_code': 'IDENTITY_LOCKED_AFTER_VERIFICATION',
+        }, status=403)
+
+    # valeurs de localisation AVANT modification — sert seulement à savoir si
+    # une localisation en cascade sur les produits déjà publiés est nécessaire
+    # (voir _repercuter_localisation_sur_produits plus bas) : le formulaire
+    # "Informations de l'entreprise" (ModifierProfil.jsx) envoie toujours ces
+    # champs ensemble, même si seul un champ sans rapport a changé.
+    CHAMPS_LOCALISATION = ('departement', 'commune', 'section_communale', 'adresse', 'latitude', 'longitude')
+    avant_localisation = {champ: getattr(entreprise, champ) for champ in CHAMPS_LOCALISATION}
+
     # mise à jour partielle : seuls les champs présents dans le JSON sont modifiés
     for champ in ['nom_Entreprise', 'num_Enregistrement', 'secteur', 'description',
                   'email', 'telephone', 'adresse', 'commune', 'pays',
@@ -615,6 +716,9 @@ def modifierEntreprise(request):
         return JsonResponse({
             'error': "Le nom de l'entreprise, le numéro d'enregistrement ou l'email existe déjà"
         }, status=400)
+
+    if any(getattr(entreprise, champ) != avant_localisation[champ] for champ in CHAMPS_LOCALISATION):
+        _repercuter_localisation_sur_produits(utilisateur, entreprise)
 
     return JsonResponse({
         'message':    'Entreprise mise à jour avec succès',
@@ -719,6 +823,16 @@ def soumettre_verification(request):
     utilisateur = _get_user_from_token(request)
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
+
+    # un compte administrateur ne doit jamais pouvoir devenir vendeur (rôles
+    # mutuellement exclusifs par conception, voir Profil.ROLES) — vérifié ici
+    # côté serveur, pas seulement masqué côté frontend (HomePage.jsx/
+    # DevenirVendeur.jsx), pour ne pas dépendre uniquement de l'UI.
+    if utilisateur.profil.role == 'admin':
+        return JsonResponse({
+            'error': "Un compte administrateur ne peut pas devenir vendeur",
+            'error_code': 'ADMIN_CANNOT_BECOME_SELLER',
+        }, status=403)
 
     # le type de demandeur est déduit du compte, jamais déclaré par le client :
     # même logique que Profil.obtenir_utilisateur_type()/est_entreprise —
@@ -913,9 +1027,15 @@ def listerUtilisateursAdmin(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
+<<<<<<< Updated upstream
     # vérification du rôle avant d'exposer des données sensibles
     if utilisateur.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+=======
+    # vérification du droit avant d'exposer des données sensibles
+    if not verifier_droit_admin(utilisateur, 'gestion_utilisateurs'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_utilisateurs'}}, status=403)
+>>>>>>> Stashed changes
 
     utilisateurs = Utilisateur.objects.all()
 
@@ -943,8 +1063,13 @@ def toggleBloquerUtilisateur(request):
     if not admin:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
+<<<<<<< Updated upstream
     if admin.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+=======
+    if not verifier_droit_admin(admin, 'gestion_utilisateurs'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_utilisateurs'}}, status=403)
+>>>>>>> Stashed changes
 
     try:
         data = json.loads(request.body)
@@ -964,12 +1089,25 @@ def toggleBloquerUtilisateur(request):
     if cible.id == admin.id:
         return JsonResponse({'error': 'Vous ne pouvez pas bloquer votre propre compte'}, status=400)
 
+    # bloquer un AUTRE compte admin est réservé au moins à "Tous les droits"
+    # (gestion_utilisateurs seul ne suffit pas), ET soumis à la hiérarchie
+    # entre comptes admin (voir peut_agir_sur_admin, Registration/models.py) :
+    # un compte "Tous les droits" ne peut pas bloquer un autre compte "Tous
+    # les droits" ni le super super admin — seul CE DERNIER le peut
+    if cible.profil.role == 'admin':
+        if not verifier_droit_admin(admin, 'super_admin'):
+            return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+        if not peut_agir_sur_admin(admin, cible):
+            return JsonResponse({'error': "Vous ne pouvez pas effectuer cette action sur ce compte administrateur", 'error_code': 'CANNOT_ACT_ON_ADMIN'}, status=403)
+
     if cible.est_bloquer:
         cible.debloquer()
         message = 'Compte débloqué avec succès'
+        enregistrer_audit(admin, 'utilisateur.debloquer', f"A débloqué le compte de {cible.prenom} {cible.nom} (id {cible.id})")
     else:
         cible.bloquer()
         message = 'Compte bloqué avec succès'
+        enregistrer_audit(admin, 'utilisateur.bloquer', f"A bloqué le compte de {cible.prenom} {cible.nom} (id {cible.id})")
 
     return JsonResponse({
         'message':     message,
@@ -977,6 +1115,7 @@ def toggleBloquerUtilisateur(request):
     }, status=200)
 
 
+<<<<<<< Updated upstream
 # ── ADMIN — NOMMER UN AUTRE COMPTE ADMINISTRATEUR ────────────────────────────
 @csrf_exempt
 def nommerAdminUtilisateur(request):
@@ -996,18 +1135,48 @@ def nommerAdminUtilisateur(request):
 
     if admin.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+=======
+# ── ADMIN — SUPPRIMER DÉFINITIVEMENT UN COMPTE ───────────────────────────────
+@csrf_exempt
+def supprimerUtilisateurAdmin(request):
+    """
+    Supprime définitivement un compte utilisateur (accès réservé au rôle admin).
+    CASCADE : supprime aussi profil, tokens, demande de vérification, entreprises
+    possédées, produits publiés, conversations/messages, etc. (voir les on_delete
+    définis sur chaque ForeignKey vers Utilisateur — Registration/models.py,
+    Produits/models/*, Messagerie/models.py). Contrairement au blocage
+    (toggleBloquerUtilisateur), cette action est irréversible.
+    """
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'gestion_utilisateurs'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_utilisateurs'}}, status=403)
+>>>>>>> Stashed changes
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
+<<<<<<< Updated upstream
         return JsonResponse({'error': 'Corps de requête JSON invalide'}, status=400)
 
     if 'id' not in data:
         return JsonResponse({'error': 'Le champ id est requis'}, status=400)
+=======
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+>>>>>>> Stashed changes
 
     try:
         cible = Utilisateur.objects.get(id=data['id'])
     except Utilisateur.DoesNotExist:
+<<<<<<< Updated upstream
         return JsonResponse({'error': 'Utilisateur introuvable'}, status=404)
 
     if cible.profil.role == 'admin':
@@ -1017,6 +1186,99 @@ def nommerAdminUtilisateur(request):
 
     return JsonResponse({
         'message':     'Compte nommé administrateur avec succès',
+=======
+        return JsonResponse({'error': 'Utilisateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+
+    # un admin ne doit pas pouvoir se supprimer lui-même (même raison que pour
+    # le blocage — perte d'accès sans personne d'autre pour le récupérer, si
+    # c'est le seul compte admin)
+    if cible.id == admin.id:
+        return JsonResponse({'error': 'Vous ne pouvez pas supprimer votre propre compte'}, status=400)
+
+    # supprimer un AUTRE compte admin est réservé au moins à "Tous les
+    # droits", ET soumis à la même hiérarchie que bloquer/révoquer (voir
+    # peut_agir_sur_admin, Registration/models.py) : un compte "Tous les
+    # droits" ne peut pas supprimer un autre compte "Tous les droits" — et
+    # PERSONNE ne peut supprimer le super super admin, intouchable
+    if cible.profil.role == 'admin':
+        if not verifier_droit_admin(admin, 'super_admin'):
+            return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+        if not peut_agir_sur_admin(admin, cible):
+            return JsonResponse({'error': "Vous ne pouvez pas supprimer ce compte administrateur", 'error_code': 'CANNOT_ACT_ON_ADMIN'}, status=403)
+
+    nom_cible, id_cible = f"{cible.prenom} {cible.nom}", cible.id
+    cible.delete()
+    enregistrer_audit(admin, 'utilisateur.supprimer', f"A supprimé définitivement le compte de {nom_cible} (id {id_cible})")
+
+    return JsonResponse({'message': 'Compte supprimé avec succès'}, status=200)
+
+
+# ── ADMIN — RÉACTIVER UN VENDEUR SUSPENDU PAR SIGNALEMENTS ───────────────────
+@csrf_exempt
+def reactiverVendeurAdmin(request):
+    """
+    Lève la suspension automatique déclenchée par plus de 5 signalements pour
+    le même motif (voir signalerVendeur, Produits/views/signalementsViews.py)
+    — réservé aux administrateurs. Ne réactive PAS automatiquement les
+    produits laissés indisponibles par cette suspension : le vendeur doit les
+    remettre disponibles lui-même, un par un, une fois la suspension levée
+    (même règle que Utilisateur.debloquer, Registration/models.py).
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'gestion_utilisateurs'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_utilisateurs'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+
+    cible.desactive_par_signalements = False
+    cible.save(update_fields=['desactive_par_signalements'])
+
+    # ne réactive PAS automatiquement les produits laissés indisponibles :
+    # c'est au vendeur de les remettre disponibles lui-même, un par un, une
+    # fois la suspension levée (même règle que Utilisateur.debloquer,
+    # Registration/models.py) — une réactivation en masse redonnerait
+    # instantanément en vente d'éventuels produits toujours problématiques
+    # que le vendeur n'a pas eu l'occasion de corriger
+
+    # nettoie tous les signalements reçus par ce vendeur (traités ou non) —
+    # sinon d'anciens signalements continueraient à compter dans le seuil de
+    # SEUIL_SIGNALEMENTS_VENDEUR (voir signalerVendeur, Produits/views/
+    # signalementsViews.py) et pourraient re-déclencher une suspension
+    # immédiate à partir de très peu de nouveaux signalements. Les ids encore
+    # en attente sont capturés avant suppression pour les retirer de la file
+    # des AUTRES admins (même évènement que traiterSignalementVendeur, pas
+    # besoin d'un type d'évènement dédié).
+    from Produits.models import SignalementVendeur
+    signalements_du_vendeur = SignalementVendeur.objects.filter(vendeur=cible)
+    ids_en_attente = list(signalements_du_vendeur.filter(admin_traitant__isnull=True).values_list('id', flat=True))
+    signalements_du_vendeur.delete()
+
+    from Api.broadcast import broadcast_to_admins
+    for signalement_id in ids_en_attente:
+        broadcast_to_admins('signalement_vendeur.traite', {'id': signalement_id})
+
+    enregistrer_audit(admin, 'utilisateur.reactiver_vendeur', f"A réactivé le vendeur {cible.prenom} {cible.nom} (id {cible.id})")
+
+    return JsonResponse({
+        'message':     'Vendeur réactivé avec succès',
+>>>>>>> Stashed changes
         'utilisateur': {**_serialiseUtilisateur(cible), 'role': cible.profil.role},
     }, status=200)
 
@@ -1086,9 +1348,17 @@ def lister_demandes_admin(request):
     if not utilisateur:
         return JsonResponse({'error': "Token d'authentification requis"}, status=401)
 
+<<<<<<< Updated upstream
     # vérification du rôle avant d'exposer des données sensibles
     if utilisateur.profil.role != 'admin':
         return JsonResponse({'error': "Accès réservé aux administrateurs"}, status=403)
+=======
+    # plus de droit "gestion_verifications" dédié : la vérification KYC est
+    # désormais entièrement automatique (voir _lancer_pipeline_ocr) — cette
+    # liste ne sert plus que de filet de sécurité manuel, réservé au super admin
+    if not verifier_droit_admin(utilisateur, 'super_admin'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+>>>>>>> Stashed changes
 
     # 'en_attente_manuelle' = la vérification MCI automatique (_verifier_patente_mci)
     # n'a pas pu conclure seule (site indisponible, ou nom trouvé mais numéro non
@@ -1115,6 +1385,648 @@ def lister_demandes_admin(request):
             for d in demandes
         ],
     }, status=200)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GESTION DES ADMs — réservée aux super admins (voir DroitsAdmin.super_admin)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 'gestion_verifications' retiré (KYC désormais géré automatiquement par le
+# modèle, voir _lancer_pipeline_ocr) — le champ reste sur DroitsAdmin en base
+# (inoffensif, plus jamais coché) pour éviter une migration inutile
+DROITS_ASSIGNABLES = [
+    'gestion_utilisateurs', 'gestion_signalements',
+    'gestion_categories', 'gestion_support', 'gestion_sauvegardes',
+    'gestion_mots_de_passe',
+]
+
+
+def _serialiseDroitsAdmin(droits):
+    """None si le compte n'est pas admin, ou admin sans droits attribués —
+    voir _serialiseProfil ci-dessus et DroitsAdmin, Registration/models.py.
+    est_super_super_admin : lecture seule, jamais attribuable via l'API (voir
+    _appliquer_droits) — affiché pour que le frontend rende ce compte
+    intouchable dans l'interface (pas de bouton bloquer/révoquer/modifier)."""
+    if not droits:
+        return None
+    return {
+        'super_admin':           droits.super_admin,
+        'est_super_super_admin': droits.est_super_super_admin,
+        **{champ: getattr(droits, champ) for champ in DROITS_ASSIGNABLES},
+    }
+
+
+# libellés français des droits — pour affichage uniquement (rapport PDF,
+# voir genererRapportAudit ci-dessous) ; mêmes libellés que
+# admin.dashboard.adms.droits.* côté frontend (fr.json)
+LIBELLES_DROITS = {
+    'gestion_utilisateurs':  'Gestion des utilisateurs',
+    'gestion_signalements':  'Gestion des signalements',
+    'gestion_categories':    'Gestion des catégories',
+    'gestion_support':       'Gestion du support',
+    'gestion_sauvegardes':   'Gestion des sauvegardes',
+    'gestion_mots_de_passe': 'Réinitialisation des mots de passe',
+}
+
+
+def _libelle_droits_admin(droits):
+    """Libellé lisible des droits d'un admin (pour le rapport PDF) — 'Tous les
+    droits' (ou 'Super super admin' pour le compte intouchable) s'il a tous
+    les droits, sinon la liste des droits précis attribués."""
+    if not droits:
+        return ''
+    if droits.est_super_super_admin:
+        return 'Super super admin'
+    if droits.super_admin:
+        return 'Tous les droits'
+    return ', '.join(LIBELLES_DROITS[d] for d in DROITS_ASSIGNABLES if getattr(droits, d))
+
+
+def _serialiseAdmin(utilisateur):
+    return {
+        **_serialiseUtilisateur(utilisateur),
+        'droits': _serialiseDroitsAdmin(getattr(utilisateur, 'droits_admin', None)),
+    }
+
+
+def _appliquer_droits(droits_admin, data, attribue_par):
+    """Applique les droits reçus du frontend (booléens, champs absents ignorés
+    — permet de n'envoyer que ce qui change) à un DroitsAdmin déjà créé.
+    'super_admin' et 'est_super_super_admin' ne sont JAMAIS touchés ici,
+    volontairement : le premier ne doit être attribuable qu'en connaissance de
+    cause (voir promouvoirAdmin/modifierDroitsAdmin, qui le gèrent à part et
+    seulement pour un super super admin agissant), le second n'est posé QUE
+    par le bootstrap du tout premier compte (Registration/signals.py) — ni
+    l'un ni l'autre n'est jamais modifiable via _appliquer_droits."""
+    for champ in DROITS_ASSIGNABLES:
+        if champ in data:
+            setattr(droits_admin, champ, bool(data[champ]))
+    droits_admin.attribue_par = attribue_par
+    droits_admin.save()
+
+
+# ── VALIDATION — CRÉATION/ÉDITION D'UN COMPTE ADM ─────────────────────────────
+# noms/prénoms sans chiffre (accents/espaces/apostrophes/traits d'union admis,
+# comme la plupart des identités haïtiennes composées, ex. "Jean-Baptiste")
+_RE_NOM_SANS_CHIFFRE = re.compile(r'^[^\d]+$')
+# même règle que le frontend (Authentification.jsx::isValidTelephone) : 8
+# chiffres (numéro local haïtien) ou 11 chiffres commençant par 509
+_RE_TELEPHONE_HAITI = re.compile(r'^(509)?\d{8}$')
+
+
+def _valider_nom_prenom(valeur, nom_champ):
+    """Retourne un message d'erreur (str) si `valeur` contient un chiffre,
+    None sinon."""
+    if valeur and not _RE_NOM_SANS_CHIFFRE.match(valeur):
+        return f"Le champ {nom_champ} ne doit pas contenir de chiffre"
+    return None
+
+
+def _valider_telephone(valeur):
+    """Retourne un message d'erreur (str) si `valeur` ne respecte pas le
+    format attendu (8 chiffres, ou 11 chiffres commençant par 509), None sinon."""
+    chiffres = re.sub(r'\D', '', valeur or '')
+    if not _RE_TELEPHONE_HAITI.match(chiffres):
+        return "Le numéro de téléphone doit être un numéro haïtien valide (8 chiffres, ou 509 suivi de 8 chiffres)"
+    return None
+
+
+def _verifier_recaptcha(token):
+    """
+    Vérifie un jeton reCAPTCHA auprès de l'API Google (voir settings.
+    RECAPTCHA_SECRET_KEY). Contrairement au formulaire d'inscription public
+    (Registration/Authentification.jsx), qui n'a jamais eu de vérification
+    côté serveur, la création d'un compte ADM est jugée assez sensible pour
+    exiger une vraie vérification serveur — pas seulement le widget affiché.
+    Si RECAPTCHA_SECRET_KEY n'est pas configurée (dev sans clé), la
+    vérification est ignorée (log console) plutôt que de bloquer tout le
+    monde en local. Retourne True si valide (ou ignorée), False sinon.
+    """
+    if not settings.RECAPTCHA_SECRET_KEY:
+        print("AVERTISSEMENT : RECAPTCHA_SECRET_KEY non configurée — vérification reCAPTCHA ignorée (dev)")
+        return True
+    if not token:
+        return False
+    try:
+        reponse = requests.post('https://www.google.com/recaptcha/api/siteverify', data={
+            'secret':   settings.RECAPTCHA_SECRET_KEY,
+            'response': token,
+        }, timeout=5)
+        return bool(reponse.json().get('success'))
+    except requests.RequestException:
+        return False
+
+
+# ── LISTER LES COMPTES ADMIN ──────────────────────────────────────────────────
+@csrf_exempt
+def listerAdmins(request):
+    """
+    Liste tous les comptes admin avec leurs droits — réservé au super admin
+    ET aux admins à droits limités possédant gestion_mots_de_passe (ils ont
+    besoin de voir la liste pour choisir sur qui réinitialiser un mot de
+    passe, voir reinitialiserMotDePasseAdmin ; le frontend leur affiche alors
+    une vue réduite, voir AdminDashboard.jsx)."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not (verifier_droit_admin(utilisateur, 'super_admin') or verifier_droit_admin(utilisateur, 'gestion_mots_de_passe')):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+
+    admins = Utilisateur.objects.filter(profil__role='admin').select_related('profil', 'droits_admin')
+
+    return JsonResponse({
+        'admins': [_serialiseAdmin(a) for a in admins],
+    }, status=200)
+
+
+# ── CRÉER UN NOUVEAU COMPTE ADMIN ─────────────────────────────────────────────
+@csrf_exempt
+def creerAdmin(request):
+    """Crée directement un nouveau compte admin (pas une promotion d'un compte
+    existant — voir promouvoirAdmin) avec les droits choisis — réservé au super admin."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'super_admin'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    for field in ['nom', 'prenom', 'email', 'mot_de_passe', 'telephone']:
+        if not data.get(field):
+            return JsonResponse({'error': f'Le champ {field} est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': field}}, status=400)
+
+    if not _verifier_recaptcha(data.get('recaptcha')):
+        return JsonResponse({'error': 'Vérification reCAPTCHA échouée', 'error_code': 'RECAPTCHA_INVALID'}, status=400)
+
+    erreur_nom    = _valider_nom_prenom(data['nom'], 'nom')
+    erreur_prenom = _valider_nom_prenom(data['prenom'], 'prénom')
+    if erreur_nom or erreur_prenom:
+        return JsonResponse({'error': erreur_nom or erreur_prenom, 'error_code': 'INVALID_NAME'}, status=400)
+
+    erreur_telephone = _valider_telephone(data['telephone'])
+    if erreur_telephone:
+        return JsonResponse({'error': erreur_telephone, 'error_code': 'INVALID_PHONE'}, status=400)
+
+    # super_admin n'est jamais attribuable via l'API (voir _appliquer_droits)
+    if not any(data.get(d) for d in DROITS_ASSIGNABLES):
+        return JsonResponse({'error': "Au moins un droit doit être attribué", 'error_code': 'DROIT_MANQUANT'}, status=400)
+
+    if Utilisateur.objects.filter(email=data['email']).exists():
+        return JsonResponse({'error': "L'email existe déjà"}, status=400)
+
+    with transaction.atomic():
+        nouvel_admin = Utilisateur.objects.create(
+            nom          = data['nom'],
+            prenom       = data['prenom'],
+            email        = data['email'],
+            mot_de_passe = haser_password(data['mot_de_passe']),
+            telephone    = data.get('telephone', ''),
+            est_actif    = False,
+        )
+        nouvel_admin.profil.convertir_en_admin()   # signal post_save crée déjà le Profil (role='acheteur' par défaut)
+
+        droits_admin = DroitsAdmin.objects.create(utilisateur=nouvel_admin)
+        _appliquer_droits(droits_admin, data, attribue_par=admin)
+
+    enregistrer_audit(admin, 'admin.creer', f"A créé le compte admin de {nouvel_admin.prenom} {nouvel_admin.nom} ({nouvel_admin.email})")
+
+    # notifie le nouvel admin par email — jamais le mot de passe en clair
+    # (choisi par le créateur du compte, à lui de le communiquer directement) ;
+    # échec d'envoi non bloquant, même principe que DemandeVerification.
+    # marquer_verifie/marquer_echoue (Registration/models.py)
+    try:
+        send_mail(
+            subject='Votre compte administrateur RekoltHt a été créé',
+            message=(
+                f"Bonjour {nouvel_admin.prenom},\n\n"
+                f"Un compte administrateur RekoltHt vient d'être créé pour vous par {admin.prenom} {admin.nom}.\n"
+                f"Adresse de connexion : {nouvel_admin.email}\n\n"
+                "Le mot de passe vous a été communiqué séparément par la personne qui a créé votre compte.\n\n"
+                f"Connectez-vous ici : {settings.FRONTEND_URL}/auth\n\n"
+                "L'équipe RekoltHt"
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[nouvel_admin.email],
+            fail_silently=False,
+        )
+    except Exception as e:
+        print(f"ERREUR envoi email de création de compte admin ({nouvel_admin.email}) :", e)
+
+    return JsonResponse({
+        'message': 'Compte admin créé avec succès',
+        'admin':   _serialiseAdmin(nouvel_admin),
+    }, status=201)
+
+
+# ── PROMOUVOIR UN UTILISATEUR EXISTANT EN ADMIN ───────────────────────────────
+@csrf_exempt
+def promouvoirAdmin(request):
+    """Promeut un compte acheteur/vendeur existant en admin, en choisissant ses
+    droits dans le même appel — réservé au super admin. Remplace l'ancienne
+    nommerAdminUtilisateur (qui ne posait aucun droit, tout ou rien)."""
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'super_admin'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    # super_admin n'est jamais attribuable via l'API (voir _appliquer_droits)
+    if not any(data.get(d) for d in DROITS_ASSIGNABLES):
+        return JsonResponse({'error': "Au moins un droit doit être attribué", 'error_code': 'DROIT_MANQUANT'}, status=400)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+
+    if cible.profil.role == 'admin':
+        return JsonResponse({'error': 'Ce compte est déjà administrateur'}, status=400)
+
+    # un compte Gmail déjà utilisé comme acheteur/vendeur ne doit pas pouvoir
+    # devenir ADM (demande explicite) — seul un compte créé directement via
+    # creerAdmin (mot de passe propre) peut être admin
+    if cible.email.strip().lower().endswith('@gmail.com'):
+        return JsonResponse({
+            'error': "Un compte Gmail déjà utilisé comme acheteur ou vendeur ne peut pas devenir administrateur",
+            'error_code': 'GMAIL_CANNOT_BECOME_ADMIN',
+        }, status=400)
+
+    with transaction.atomic():
+        cible.profil.convertir_en_admin()
+        droits_admin, _ = DroitsAdmin.objects.get_or_create(utilisateur=cible)
+        _appliquer_droits(droits_admin, data, attribue_par=admin)
+
+    enregistrer_audit(admin, 'admin.promouvoir', f"A promu {cible.prenom} {cible.nom} (id {cible.id}) au rang d'administrateur")
+
+    return JsonResponse({
+        'message': 'Compte promu administrateur avec succès',
+        'admin':   _serialiseAdmin(cible),
+    }, status=200)
+
+
+# ── MODIFIER LES DROITS D'UN ADMIN EXISTANT ───────────────────────────────────
+@csrf_exempt
+def modifierDroitsAdmin(request):
+    """Change les droits d'un admin déjà en poste — réservé au super admin."""
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'super_admin'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    # un super admin ne doit pas pouvoir modifier ses propres droits — seul un
+    # AUTRE compte super admin peut le faire (évite qu'il s'auto-restreigne
+    # ou se retire des droits par erreur, sans personne pour le corriger)
+    if str(data['id']) == str(admin.id):
+        return JsonResponse({'error': 'Vous ne pouvez pas modifier vos propres droits', 'error_code': 'CANNOT_MODIFY_OWN_RIGHTS'}, status=403)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+
+    if cible.profil.role != 'admin':
+        return JsonResponse({'error': "Ce compte n'est pas administrateur", 'error_code': 'NOT_ADMIN'}, status=400)
+
+    # hiérarchie entre comptes admin (voir peut_agir_sur_admin,
+    # Registration/models.py) : un compte "Tous les droits" ne peut pas
+    # modifier les droits d'un autre compte "Tous les droits" ni du super
+    # super admin — seul CE DERNIER le peut
+    if not peut_agir_sur_admin(admin, cible):
+        return JsonResponse({'error': "Vous ne pouvez pas modifier les droits de ce compte administrateur", 'error_code': 'CANNOT_ACT_ON_ADMIN'}, status=403)
+
+    droits_admin, _ = DroitsAdmin.objects.get_or_create(utilisateur=cible)
+    _appliquer_droits(droits_admin, data, attribue_par=admin)
+
+    if not (droits_admin.super_admin or any(getattr(droits_admin, d) for d in DROITS_ASSIGNABLES)):
+        return JsonResponse({'error': "Au moins un droit doit rester attribué", 'error_code': 'DROIT_MANQUANT'}, status=400)
+
+    enregistrer_audit(admin, 'admin.modifier_droits', f"A modifié les droits de {cible.prenom} {cible.nom} (id {cible.id})")
+
+    return JsonResponse({
+        'message': 'Droits mis à jour avec succès',
+        'admin':   _serialiseAdmin(cible),
+    }, status=200)
+
+
+# ── RÉVOQUER LES DROITS ADMIN D'UN COMPTE ─────────────────────────────────────
+@csrf_exempt
+def revoquerAdmin(request):
+    """
+    Rétrograde un admin en acheteur et supprime ses droits — démission
+    complète (pas juste retirer un droit précis, voir modifierDroitsAdmin
+    pour ça). Réservé au super admin. Invalide aussi sa session active, même
+    logique que Utilisateur.bloquer() (Registration/models.py).
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'super_admin'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+
+    if cible.id == admin.id:
+        return JsonResponse({'error': 'Vous ne pouvez pas révoquer vos propres droits'}, status=400)
+
+    if cible.profil.role != 'admin':
+        return JsonResponse({'error': "Ce compte n'est pas administrateur", 'error_code': 'NOT_ADMIN'}, status=400)
+
+    # hiérarchie entre comptes admin (voir peut_agir_sur_admin,
+    # Registration/models.py) : un compte "Tous les droits" ne peut pas
+    # révoquer un autre compte "Tous les droits" ni le super super admin —
+    # seul CE DERNIER le peut
+    if not peut_agir_sur_admin(admin, cible):
+        return JsonResponse({'error': "Vous ne pouvez pas révoquer ce compte administrateur", 'error_code': 'CANNOT_ACT_ON_ADMIN'}, status=403)
+
+    with transaction.atomic():
+        DroitsAdmin.objects.filter(utilisateur=cible).delete()
+        cible.profil.convertir_en_acheteur()
+        cible.tokens.all().delete()   # invalide toute session active, même logique que Utilisateur.bloquer()
+
+    enregistrer_audit(admin, 'admin.revoquer', f"A révoqué les droits admin de {cible.prenom} {cible.nom} (id {cible.id})")
+
+    return JsonResponse({
+        'message':     'Droits admin révoqués avec succès',
+        'utilisateur': {**_serialiseUtilisateur(cible), 'role': cible.profil.role},
+    }, status=200)
+
+
+# ── MODIFIER LES INFOS D'UN AUTRE ADMIN ───────────────────────────────────────
+@csrf_exempt
+def modifierInfosAdmin(request):
+    """
+    Modifie nom/prénom/email/téléphone d'un AUTRE compte admin — réservé au
+    super admin, soumis à la même hiérarchie que bloquer/révoquer/modifier
+    les droits (voir peut_agir_sur_admin, Registration/models.py). Pour
+    modifier SES PROPRES infos, un admin utilise le même endpoint que
+    n'importe quel utilisateur (voir modifierUtilisateur ci-dessus, déjà
+    accessible sans restriction de rôle) — cet endpoint-ci ne sert qu'à agir
+    sur le compte de quelqu'un d'autre.
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'super_admin'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    if str(data['id']) == str(admin.id):
+        return JsonResponse({'error': "Utilisez votre propre page de profil pour modifier vos infos", 'error_code': 'USE_OWN_PROFILE'}, status=400)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+
+    if cible.profil.role != 'admin':
+        return JsonResponse({'error': "Ce compte n'est pas administrateur", 'error_code': 'NOT_ADMIN'}, status=400)
+
+    if not peut_agir_sur_admin(admin, cible):
+        return JsonResponse({'error': "Vous ne pouvez pas modifier les infos de ce compte administrateur", 'error_code': 'CANNOT_ACT_ON_ADMIN'}, status=403)
+
+    if 'nom' in data:
+        erreur = _valider_nom_prenom(data['nom'], 'nom')
+        if erreur:
+            return JsonResponse({'error': erreur, 'error_code': 'INVALID_NAME'}, status=400)
+    if 'prenom' in data:
+        erreur = _valider_nom_prenom(data['prenom'], 'prénom')
+        if erreur:
+            return JsonResponse({'error': erreur, 'error_code': 'INVALID_NAME'}, status=400)
+    if 'telephone' in data:
+        erreur = _valider_telephone(data['telephone'])
+        if erreur:
+            return JsonResponse({'error': erreur, 'error_code': 'INVALID_PHONE'}, status=400)
+
+    for champ in ['nom', 'prenom', 'email', 'telephone']:
+        if champ in data:
+            setattr(cible, champ, data[champ])
+
+    try:
+        cible.save()
+    except IntegrityError:
+        return JsonResponse({'error': "L'email existe déjà"}, status=400)
+
+    enregistrer_audit(admin, 'admin.modifier_infos', f"A modifié les informations de {cible.prenom} {cible.nom} (id {cible.id})")
+
+    return JsonResponse({
+        'message': 'Informations mises à jour avec succès',
+        'admin':   _serialiseAdmin(cible),
+    }, status=200)
+
+
+# ── RÉINITIALISER LE MOT DE PASSE D'UN AUTRE ADMIN ────────────────────────────
+@csrf_exempt
+def reinitialiserMotDePasseAdmin(request):
+    """
+    Force un AUTRE compte admin à changer son mot de passe à sa prochaine
+    connexion (voir Utilisateur.doit_changer_mot_de_passe, seConnecter,
+    modifierMotDePasse) — ne modifie PAS le mot de passe actuel, ne l'invalide
+    pas, n'envoie aucun mot de passe temporaire par email : le compte visé
+    reste connectable avec son mot de passe actuel, mais devra en choisir un
+    nouveau avant de pouvoir faire quoi que ce soit d'autre.
+
+    Réservé au droit gestion_mots_de_passe (ou "Tous les droits"/super super
+    admin, qui l'impliquent). Voir peut_reinitialiser_mdp (Registration/
+    models.py) : un admin qui ne possède QUE gestion_mots_de_passe peut
+    réinitialiser le mot de passe d'un AUTRE admin à droits limités, sauf si
+    celui-ci possède lui aussi ce droit précis (délégation entre pairs
+    interdite) — jamais celui d'un compte "Tous les droits" ni du super
+    super admin, sauf pour ce dernier qui peut agir sur tout le monde.
+    """
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    admin = _get_user_from_token(request)
+    if not admin:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(admin, 'gestion_mots_de_passe'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_mots_de_passe'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    if str(data['id']) == str(admin.id):
+        return JsonResponse({'error': 'Vous ne pouvez pas réinitialiser votre propre mot de passe de cette façon — utilisez le changement de mot de passe habituel', 'error_code': 'CANNOT_RESET_OWN_PASSWORD'}, status=400)
+
+    try:
+        cible = Utilisateur.objects.get(id=data['id'])
+    except Utilisateur.DoesNotExist:
+        return JsonResponse({'error': 'Utilisateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+
+    if cible.profil.role != 'admin':
+        return JsonResponse({'error': "Ce compte n'est pas administrateur", 'error_code': 'NOT_ADMIN'}, status=400)
+
+    if not peut_reinitialiser_mdp(admin, cible):
+        return JsonResponse({'error': "Vous ne pouvez pas réinitialiser le mot de passe de ce compte administrateur", 'error_code': 'CANNOT_ACT_ON_ADMIN'}, status=403)
+
+    cible.doit_changer_mot_de_passe = True
+    cible.save(update_fields=['doit_changer_mot_de_passe'])
+
+    enregistrer_audit(admin, 'admin.reinitialiser_mdp', f"A demandé la réinitialisation du mot de passe de {cible.prenom} {cible.nom} (id {cible.id})")
+
+    try:
+        send_mail(
+            subject='Réinitialisation de votre mot de passe RekoltHt',
+            message=(
+                f"Bonjour {cible.prenom},\n\n"
+                f"{admin.prenom} {admin.nom} a demandé la réinitialisation de votre mot de passe administrateur.\n"
+                "Vous pouvez toujours vous connecter avec votre mot de passe actuel, mais il vous sera demandé "
+                "d'en choisir un nouveau avant de pouvoir accéder au reste de la plateforme.\n\n"
+                "L'équipe RekoltHt"
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[cible.email],
+            fail_silently=False,
+        )
+    except Exception as e:
+        print(f"ERREUR envoi email de réinitialisation de mot de passe ({cible.email}) :", e)
+
+    return JsonResponse({
+        'message': 'Réinitialisation du mot de passe déclenchée avec succès',
+        'admin':   _serialiseAdmin(cible),
+    }, status=200)
+
+
+# ── RAPPORT PDF DU JOURNAL D'AUDIT ────────────────────────────────────────────
+@csrf_exempt
+def genererRapportAudit(request):
+    """
+    Génère le rapport PDF des actions admin (JournalAudit) sur une période
+    choisie, filtrable sur un admin précis — réservé au super admin. Le nom
+    de fichier (Report-Audit-{début}-{fin}-{heure}.pdf) est composé côté
+    frontend, pas ici (voir AdminDashboard.jsx) — cette vue renvoie juste le PDF.
+    """
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(utilisateur, 'super_admin'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'super_admin'}}, status=403)
+
+    from datetime import datetime
+
+    date_debut_str = request.GET.get('date_debut')
+    date_fin_str   = request.GET.get('date_fin')
+    if not date_debut_str or not date_fin_str:
+        return JsonResponse({'error': 'Les champs date_debut et date_fin (AAAA-MM-JJ) sont requis', 'error_code': 'FIELD_REQUIRED'}, status=400)
+
+    try:
+        date_debut = datetime.strptime(date_debut_str, '%Y-%m-%d').date()
+        date_fin   = datetime.strptime(date_fin_str, '%Y-%m-%d').date()
+    except ValueError:
+        return JsonResponse({'error': 'Dates invalides, format attendu AAAA-MM-JJ', 'error_code': 'INVALID_DATE'}, status=400)
+
+    if date_debut > date_fin:
+        return JsonResponse({'error': 'La date de début doit précéder la date de fin'}, status=400)
+
+    # aucune donnée sur une période qu'on n'a pas encore vécue — même règle
+    # que le sélecteur de dates côté frontend (voir AdminDashboard.jsx)
+    if date_fin > timezone.localdate():
+        return JsonResponse({'error': 'La date de fin ne peut pas être dans le futur', 'error_code': 'INVALID_DATE'}, status=400)
+
+    entrees = JournalAudit.objects.filter(date_action__date__gte=date_debut, date_action__date__lte=date_fin)
+
+    admin_id = request.GET.get('admin_id')
+    nom_admin_filtre = None
+    if admin_id:
+        try:
+            admin_filtre = Utilisateur.objects.get(id=admin_id)
+        except Utilisateur.DoesNotExist:
+            return JsonResponse({'error': 'Administrateur introuvable', 'error_code': 'USER_NOT_FOUND'}, status=404)
+        entrees = entrees.filter(admin_id=admin_id)
+        nom_admin_filtre = f"{admin_filtre.prenom} {admin_filtre.nom}"
+
+    entrees = entrees.select_related('admin').order_by('date_action')
+
+    # droits courants de chaque admin apparaissant dans le rapport (demande
+    # explicite : afficher les droits de chaque ADM après son nom) — droits
+    # ACTUELS, pas un historique au moment de l'action (JournalAudit ne
+    # capture pas d'instantané des droits, seulement du nom, voir nom_admin_snapshot)
+    admin_ids = {e.admin_id for e in entrees if e.admin_id}
+    droits_par_admin = {
+        da.utilisateur_id: _libelle_droits_admin(da)
+        for da in DroitsAdmin.objects.filter(utilisateur_id__in=admin_ids)
+    }
+
+    from .services.audit_rapport_service import generer_rapport_audit
+    pdf = generer_rapport_audit(
+        entrees=entrees, date_debut=date_debut, date_fin=date_fin,
+        nom_admin_filtre=nom_admin_filtre, droits_par_admin=droits_par_admin,
+    )
+
+    return HttpResponse(pdf.read(), content_type='application/pdf')
 
 
 # ── DEMANDER UN CODE PIN DE RÉINITIALISATION ──────────────────────────────────
@@ -1260,6 +2172,15 @@ def reinitialiserMotDePasse(request):
             # hash + sauvegarde via la méthode du modèle
             utilisateur.modifier_mot_de_passe(nouveau_mot_de_passe)
 
+            # l'ancien mot de passe n'est jamais connu dans ce flux (code reçu
+            # par email) : la sauvegarde chiffrée de la clé privée E2E,
+            # enveloppée sous l'ancien mot de passe, devient irrécupérable —
+            # on la supprime pour qu'une nouvelle paire de clés soit générée
+            # et publiée automatiquement à la prochaine connexion (voir
+            # e2eStore.js::garantirCleE2E), sans quoi le blob périmé
+            # resterait en base sans jamais pouvoir être déchiffré
+            CleChiffrementUtilisateur.objects.filter(utilisateur=utilisateur).delete()
+
     except CodeReinitialisation.DoesNotExist:
         return JsonResponse({'error': 'Code invalide'}, status=400)
     except Exception as e:
@@ -1270,6 +2191,43 @@ def reinitialiserMotDePasse(request):
 
 
 # ── FONCTIONS UTILITAIRES PRIVÉES ─────────────────────────────────────────────
+
+def _repercuter_localisation_sur_produits(utilisateur, source):
+    """
+    Reporte la localisation courante de `source` (Profil ou Entreprise) sur
+    tous les produits déjà publiés par `utilisateur` — voir modifierProfil et
+    modifierEntreprise ci-dessus.
+
+    À la création (voir creerProduit, Produits/views/produitsViews.py), la
+    localisation d'un produit est une COPIE de celle du vendeur au moment de
+    la publication, pas une référence : sans ce report, un vendeur qui change
+    de localisation garderait tous ses produits déjà publiés affichés à
+    l'ancienne adresse jusqu'à ce qu'il les modifie un par un.
+
+    Sauvegardés un par un (pas de .update() en masse) pour que le signal
+    broadcast_produit (Produits/signals.py) se déclenche normalement et que
+    les catalogues déjà affichés se mettent à jour sans rechargement — même
+    principe que reactiverVendeurAdmin plus haut.
+    """
+    from Produits.models import Produits
+
+    departement       = source.departement or ''
+    commune           = source.commune or ''
+    section_communale = getattr(source, 'section_communale', '') or ''
+
+    for produit in Produits.objects.filter(vendeur=utilisateur):
+        produit.departement      = departement
+        produit.commune          = commune
+        # "section_comunale" (un seul "m") est l'orthographe du champ sur
+        # Produits — incohérente avec "section_communale" sur Profil/Entreprise,
+        # mais déjà ainsi en base (voir Produits/models/produitsModels.py)
+        produit.section_comunale = section_communale
+        produit.adresse          = source.adresse
+        produit.region           = section_communale or commune or departement or 'Non précisé'
+        produit.longitude        = source.longitude
+        produit.latitude         = source.latitude
+        produit.save()
+
 
 def _normaliser_identifiant(valeur):
     """
@@ -1508,6 +2466,7 @@ def _lancer_verification_faciale(demande):
 
 def _verifier_patente_mci(demande):
     """
+<<<<<<< Updated upstream
     Étape 05 (entreprise uniquement) : croise l'entreprise avec le registre
     public du Ministère du Commerce et de l'Industrie (Registration/services/
     patente_service.py — guichet.mci.ht/recherche). Vérifié empiriquement
@@ -1528,6 +2487,24 @@ def _verifier_patente_mci(demande):
     Si le site est indisponible, la demande reste 'en_attente_manuelle' pour
     une revue manuelle par un admin plutôt que d'échouer à tort une
     entreprise légitime à cause d'un aléa tiers.
+=======
+    GET  : retourne le matériel de chiffrement de l'utilisateur connecté
+           (404 si pas encore configuré) — clé publique + éventuelle
+           sauvegarde chiffrée de la clé privée (voir modèle
+           CleChiffrementUtilisateur).
+    POST : publie la clé publique initiale, avec en option la sauvegarde
+           chiffrée de la clé privée (409 si déjà existante).
+    PUT  : remplace la clé publique et/ou la sauvegarde chiffrée — arrive
+           soit lors d'un nouvel appareil sans clé privée en cache (génère
+           une nouvelle paire, voir e2eStore.js::garantirCleE2E), soit lors
+           d'un changement de mot de passe classique (ré-enveloppement de la
+           même clé privée sous le nouveau mot de passe, voir
+           modifierMotDePasse ci-dessus).
+    Champs cle_privee_chiffree/iv_cle_privee/sel_kdf/iterations_kdf : tous
+    optionnels, tous chiffrés/dérivés côté navigateur (voir
+    src/utils/e2eCrypto.js) — le serveur ne voit jamais la clé privée en
+    clair ni le mot de passe qui protège sa sauvegarde.
+>>>>>>> Stashed changes
     """
     entreprise = Entreprise.objects.get(pk=demande.utilisateur_id)
     numero_attendu = demande.numero_patente_extrait or entreprise.num_Enregistrement
@@ -1542,6 +2519,7 @@ def _verifier_patente_mci(demande):
         demande.marquer_echoue(f"La vérification du registre du Ministère du Commerce et de l'Industrie n'a pas pu être effectuée ({e}). Merci de réessayer plus tard.")
         return
 
+<<<<<<< Updated upstream
     demande.donnees_ocr_brutes = {**(demande.donnees_ocr_brutes or {}), 'verification_mci': resultat}
 
     if not resultat['trouve']:
@@ -1557,6 +2535,85 @@ def _verifier_patente_mci(demande):
             "et de l'Industrie, mais le numéro de patente n'a pas pu être confirmé. "
             "Vérifiez le numéro sur votre certificat et soumettez à nouveau."
         )
+=======
+    if not data.get('cle_publique'):
+        return JsonResponse({'error': 'Le champ cle_publique est requis', 'error_code': 'CHAMPS_CLE_MANQUANTS'}, status=400)
+
+    champs_sauvegarde = ('cle_privee_chiffree', 'iv_cle_privee', 'sel_kdf', 'iterations_kdf')
+
+    if request.method == 'POST':
+        if CleChiffrementUtilisateur.objects.filter(utilisateur=utilisateur).exists():
+            return JsonResponse({'error': 'Une clé de chiffrement existe déjà pour ce compte', 'error_code': 'CLE_CHIFFREMENT_EXISTE_DEJA'}, status=409)
+        cle = CleChiffrementUtilisateur.objects.create(
+            utilisateur  = utilisateur,
+            cle_publique = data['cle_publique'],
+            **{champ: data.get(champ) for champ in champs_sauvegarde},
+        )
+        return JsonResponse(_serialiseCleChiffrement(cle), status=201)
+
+    # PUT — remplacement de la clé publique et/ou de la sauvegarde chiffrée (voir garantirCleE2E)
+    cle = CleChiffrementUtilisateur.objects.filter(utilisateur=utilisateur).first()
+    if not cle:
+        return JsonResponse({'error': "Aucune clé de chiffrement configurée", 'error_code': 'CLE_CHIFFREMENT_INTROUVABLE'}, status=404)
+    cle.cle_publique = data['cle_publique']
+    for champ in champs_sauvegarde:
+        if champ in data:
+            setattr(cle, champ, data[champ])
+    cle.save()
+    return JsonResponse(_serialiseCleChiffrement(cle), status=200)
+
+
+@csrf_exempt
+def clePubliqueUtilisateur(request):
+    """Clé publique d'un utilisateur donné (?utilisateur_id=) — accessible à
+    tout compte connecté : une clé publique n'est par définition pas secrète.
+    Utilisé pour dériver le secret partagé d'une conversation privée 1:1."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    if not _get_user_from_token(request):
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    utilisateur_id = request.GET.get('utilisateur_id')
+    if not utilisateur_id:
+        return JsonResponse({'error': 'utilisateur_id manquant', 'error_code': 'UTILISATEUR_ID_MANQUANT'}, status=400)
+
+    cle = CleChiffrementUtilisateur.objects.filter(utilisateur_id=utilisateur_id).first()
+    if not cle:
+        return JsonResponse({'error': "Cet utilisateur n'a pas encore configuré sa messagerie sécurisée", 'error_code': 'CLE_CHIFFREMENT_INTROUVABLE'}, status=404)
+
+    return JsonResponse({'utilisateur_id': cle.utilisateur_id, 'cle_publique': cle.cle_publique}, status=200)
+
+
+@csrf_exempt
+def clesPubliquesAdmins(request):
+    """Clés publiques de tous les admins ayant déjà configuré leur clé E2E —
+    utilisé côté vendeur/acheteur pour chiffrer un message de support en
+    enveloppe (une copie par admin destinataire potentiel : le destinataire
+    exact n'est pas connu à l'envoi, voir contacterAdmin dans
+    Messagerie/views.py). Un admin qui configure sa clé après coup ne pourra
+    pas déchiffrer les messages déjà envoyés avant lui — seuls les nouveaux."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    if not _get_user_from_token(request):
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    cles = CleChiffrementUtilisateur.objects.filter(utilisateur__profil__role='admin')
+    return JsonResponse({
+        'admins': [{'utilisateur_id': c.utilisateur_id, 'cle_publique': c.cle_publique} for c in cles],
+    }, status=200)
+
+
+def _serialiseCleChiffrement(cle):
+    return {
+        'cle_publique':        cle.cle_publique,
+        'cle_privee_chiffree': cle.cle_privee_chiffree,
+        'iv_cle_privee':       cle.iv_cle_privee,
+        'sel_kdf':             cle.sel_kdf,
+        'iterations_kdf':      cle.iterations_kdf,
+    }
+>>>>>>> Stashed changes
 
 
 # ── SÉRIALISEURS ──────────────────────────────────────────────────────────────
@@ -1572,6 +2629,10 @@ def _serialiseUtilisateur(utilisateur):
         'est_actif':        utilisateur.est_actif,        # True = en ligne, False = hors ligne
         'est_bloquer':      utilisateur.est_bloquer,       # True = compte suspendu par un admin
         'date_inscription': utilisateur.date_inscription.isoformat(),  # format ISO 8601
+        # True = un admin a réinitialisé ce mot de passe (voir
+        # reinitialiserMotDePasseAdmin) — la prochaine connexion doit forcer un
+        # changement de mot de passe avant d'accéder au reste de la plateforme
+        'doit_changer_mot_de_passe': utilisateur.doit_changer_mot_de_passe,
     }
 
 
@@ -1604,6 +2665,11 @@ def _serialiseProfil(profil, request=None):
         # dans models.py) : c'est le champ à utiliser côté frontend pour détecter un compte entreprise,
         # plutôt que de comparer role à une valeur qui n'existe pas dans Profil.ROLES.
         'est_entreprise': isinstance(profil.obtenir_utilisateur_type(), Entreprise),
+        # droits granulaires du compte admin (voir DroitsAdmin, Registration/models.py)
+        # — null pour un compte non-admin, ou un admin sans droits attribués.
+        # Le frontend s'en sert pour masquer les onglets/actions hors de portée
+        # (AdminDashboard.jsx) ; le serveur reste la vraie limite (verifier_droit_admin).
+        'droits_admin':   _serialiseDroitsAdmin(getattr(profil.utilisateur, 'droits_admin', None)),
     }
 
 

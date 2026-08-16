@@ -64,6 +64,9 @@ cloudinary==1.45.0                 # SDK Cloudinary — lit CLOUDINARY_URL autom
 paddleocr==2.9.1                   # OCR (détection + reconnaissance de texte)
 paddlepaddle==2.6.2                # moteur de deep learning requis par PaddleOCR
 opencv-python-headless==4.10.0.84  # traitement d'image (dépendance de PaddleOCR, sans libs GUI)
+protobuf==3.20.2                   # épinglé explicitement : sans ça, une résolution de dépendances
+                                    # future (ex. mise à jour d'un autre package) peut remonter
+                                    # protobuf à une version récente et casser `import paddle`
 # La vérification faciale (étape 04, Registration/services/face_service.py) tourne
 # dans un environnement Python SÉPARÉ (deepface/tensorflow, voir requirements-face.txt)
 # — protobuf>=6.31.1 y est requis, incompatible avec paddlepaddle ci-dessus
@@ -97,9 +100,21 @@ idna==3.18                     # gestion des noms de domaine internationalisés 
 
 
 # ── SÉCURITÉ / CRYPTOGRAPHIE ──────────────────────────────────────────────────
-cryptography==48.0.0           # opérations cryptographiques (dépendance de social-auth)
+cryptography==48.0.0           # opérations cryptographiques (dépendance de social-auth) + chiffrement des sauvegardes (Sauvegarde/services/chiffrement_service.py)
 cffi==2.0.0                    # interface Python → C (dépendance de cryptography)
 pycparser==3.0                 # parseur C en Python (dépendance de cffi)
+
+
+# ── SAUVEGARDES (PLANIFICATION + GOOGLE DRIVE) ────────────────────────────────
+APScheduler==3.11.3            # planificateur en mémoire (fréquence quotidienne/hebdo/mensuelle des sauvegardes, voir Sauvegarde/apps.py)
+# volontairement PAS google-api-python-client : tire google-api-core (protobuf
+# récent), incompatible avec paddlepaddle==2.6.2 ci-dessus (protobuf<=3.20.2,
+# vérifié à l'installation — voir aussi la note sur requirements-face.txt) ;
+# Sauvegarde/services/google_drive_service.py appelle l'API REST Drive v3
+# directement via `requests` (déjà listé plus haut), google-auth ne fournit
+# que le flux OAuth2 (autorisation + rafraîchissement de token)
+google-auth==2.56.3            # objets Credentials + rafraîchissement de token OAuth2 pour Google Drive
+google-auth-oauthlib==1.4.0    # construit l'URL de consentement OAuth2 (google_auth_oauthlib.flow.Flow)
 
 
 # ── CONFIGURATION / ENVIRONNEMENT ─────────────────────────────────────────────

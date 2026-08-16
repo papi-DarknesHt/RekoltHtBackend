@@ -60,17 +60,17 @@ uv --version
 
 ```bash
 uv venv .venv --python 3.12
-uv pip install -r requirements.txt --python .venv\Scripts\python.exe
+uv pip install -r requirements.txt --python .venv/Scripts/python.exe
 ```
 
 *(sans uv : `py -3.12 -m venv .venv` puis, après activation,
-`.venv\Scripts\pip install -r requirements.txt`)*
+`.venv/Scripts/pip install -r requirements.txt`)*
 
 Puis installer le navigateur headless requis pour la vérification du
 registre d'entreprise (Playwright) :
 
 ```bash
-.venv\Scripts\python -m playwright install chromium
+.venv/Scripts/python -m playwright install chromium
 ```
 
 ### 4. Configurer les variables d'environnement
@@ -91,13 +91,13 @@ Ouvrir `.env.dev` et renseigner au minimum :
 ### 5. Appliquer les migrations
 
 ```bash
-.venv\Scripts\python manage.py migrate
+.venv/Scripts/python manage.py migrate
 ```
 
 ### 6. (Optionnel) Créer un compte administrateur
 
 ```bash
-.venv\Scripts\python manage.py createsuperuser
+.venv/Scripts/python manage.py createsuperuser
 ```
 
 ### 7. (Optionnel) Activer la vérification faciale (KYC)
@@ -109,14 +109,14 @@ sous-processus :
 
 ```bash
 uv venv venv_face --python 3.12
-uv pip install -r requirements-face.txt --python venv_face\Scripts\python.exe
-venv_face\Scripts\python -c "from deepface import DeepFace; DeepFace.build_model('ArcFace')"
+uv pip install -r requirements-face.txt --python venv_face/Scripts/python.exe
+venv_face/Scripts/python -c "from deepface import DeepFace; DeepFace.build_model('ArcFace')"
 ```
 
 Puis renseigner dans `.env.dev` :
 
 ```
-FACE_VENV_PYTHON=C:\chemin\complet\vers\RekoltHtBackend\venv_face\Scripts\python.exe
+FACE_VENV_PYTHON=C:/chemin/complet/vers/RekoltHtBackend/venv_face/Scripts/python.exe
 ```
 
 ⚠️ Le chemin doit pointer vers **`python.exe` lui-même**, pas vers le
@@ -127,7 +127,7 @@ motif explicite au lieu d'être effectuée.
 ## Lancer le projet
 
 ```bash
-.venv\Scripts\python -m uvicorn BackendRekoltHt.asgi:application --port 8000 --reload
+.venv/Scripts/python -m uvicorn BackendRekoltHt.asgi:application --port 8000 --reload
 ```
 
 - API disponible sur **http://localhost:8000/**
@@ -140,7 +140,7 @@ motif explicite au lieu d'être effectuée.
 ## Tests
 
 ```bash
-.venv\Scripts\python manage.py test
+.venv/Scripts/python manage.py test
 ```
 
 ## Déploiement en production

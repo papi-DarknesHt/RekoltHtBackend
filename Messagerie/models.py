@@ -14,6 +14,14 @@ class Conversation(models.Model):
     participant_b = models.ForeignKey(Utilisateur, on_delete=models.CASCADE, related_name='conversations_b')
     date_creation = models.DateTimeField(auto_now_add=True)
     date_maj      = models.DateTimeField(auto_now=True)  # touché à chaque nouveau message, sert à trier la liste
+    # participants ayant supprimé cette conversation de LEUR PROPRE liste (voir
+    # supprimerConversationPourMoi, Messagerie/views.py) — suppression locale à
+    # chacun, jamais partagée : l'autre participant continue de la voir
+    # normalement avec tous ses messages. Vidé automatiquement dès qu'un
+    # nouveau message est envoyé (voir envoyerMessage) : une conversation
+    # supprimée par l'un des deux redevient visible en cas de reprise de
+    # contact, comme dans la plupart des messageries grand public.
+    supprime_pour = models.ManyToManyField(Utilisateur, related_name='conversations_supprimees', blank=True)
 
     class Meta:
         db_table = "conversations"
@@ -52,8 +60,20 @@ class Message(models.Model):
     # ProductCard.jsx, côté frontend) — optionnel, SET_NULL : si le produit
     # est supprimé plus tard, le message texte (s'il y en a) reste lisible
     produit      = models.ForeignKey(Produits, on_delete=models.SET_NULL, null=True, blank=True, related_name='messages')
+    # réponse à un message précis du même fil (voir bouton "Répondre" du menu
+    # contextuel, Messagerie.jsx) — SET_NULL : si l'original est supprimé
+    # (modération admin), ce message reste lisible, juste sans sa citation.
+    # Ne porte que la référence : jamais le contenu dupliqué, le frontend
+    # retrouve/déchiffre l'original depuis les messages déjà chargés du fil.
+    repond_a     = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='reponses')
     date_envoi   = models.DateTimeField(auto_now_add=True)
     lu           = models.BooleanField(default=False)
+    # utilisateurs ayant supprimé CE message pour eux-mêmes (voir
+    # supprimerMessagePourMoi, Messagerie/views.py) — suppression locale,
+    # jamais partagée : contrairement à supprimerMessageAdmin (suppression
+    # définitive, réservée à la modération), rien n'est retiré en base, le
+    # message reste intact et visible pour l'autre participant.
+    supprime_pour = models.ManyToManyField(Utilisateur, related_name='messages_supprimes', blank=True)
 
     class Meta:
         db_table = "messages"
