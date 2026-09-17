@@ -1,0 +1,31 @@
+# Environnement
+.env
+.env.dev
+.env.prod
+venv/
+venv312/
+venv_face/
+__pycache__/
+*.pyc
+
+# Base de données
+db.sqlite3
+
+# Fichiers médias uploadés (photos de profil, etc.)
+media/
+
+# Fichiers de sauvegarde chiffrés (destination "locale", voir Sauvegarde/)
+sauvegardes/
+
+# Couverture de tests
+htmlcov/
+.coverage
+
+# IDE
+.idea/
+
+.claude/
+*.pyc
+*.sqlite3
+*.pyc
+*.pyc
