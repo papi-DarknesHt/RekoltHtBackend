@@ -1,0 +1,137 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  REQUIREMENTS — RekoltHt Backend
+#  Installer : pip install -r requirements.txt
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── FRAMEWORK PRINCIPAL ───────────────────────────────────────────────────────
+Django==6.0.4                  # framework web principal
+asgiref==3.11.1                # couche ASGI requise par Django (async support)
+sqlparse==0.5.5                # parseur SQL utilisé en interne par Django
+
+
+# ── SERVEUR ASGI / WEBSOCKET ──────────────────────────────────────────────────
+uvicorn==0.48.0                # serveur ASGI pour lancer le projet (python -m uvicorn ...)
+channels==4.3.2                # support WebSocket dans Django (Django Channels)
+websockets==16.0               # bibliothèque WebSocket bas niveau (dépendance de channels)
+httptools==0.8.0               # parseur HTTP rapide (dépendance de uvicorn)
+watchfiles==1.2.0              # rechargement automatique du serveur en développement
+h11==0.16.0                    # implémentation HTTP/1.1 (dépendance de uvicorn)
+anyio==4.13.0                  # couche async/await compatible asyncio (dépendance de channels)
+
+
+# ── API REST ──────────────────────────────────────────────────────────────────
+djangorestframework==3.17.1    # Django Rest Framework — sérialisation et vues API
+django-cors-headers==4.9.0     # gestion des headers CORS (autorise les requêtes React → Django)
+
+
+# ── FICHIERS STATIQUES ─────────────────────────────────────────────────────────
+# utilisé dans MIDDLEWARE et STATICFILES_STORAGE (BackendRekoltHt/settings/base.py)
+# mais manquait de requirements.txt — runserver plante sinon (ModuleNotFoundError)
+whitenoise==6.12.0             # sert les fichiers statiques directement depuis Django (pas de serveur web séparé requis)
+
+
+# ── AUTHENTIFICATION GOOGLE OAUTH2 ────────────────────────────────────────────
+social-auth-app-django==5.9.0  # intégration Django de social-auth (Google, GitHub, etc.)
+social-auth-core==4.9.1        # moteur central de social-auth (backends OAuth2)
+oauthlib==3.3.1                # implémentation du protocole OAuth1/OAuth2
+requests-oauthlib==2.0.0       # couche OAuth2 pour la bibliothèque requests
+python3-openid==3.2.0          # support OpenID (dépendance de social-auth)
+defusedxml==0.7.1              # parsing XML sécurisé (dépendance de social-auth)
+PyJWT==2.13.0                  # encode/décode les JSON Web Tokens (JWT)
+
+
+# ── BASE DE DONNÉES ────────────────────────────────────────────────────────────
+psycopg2-binary==2.9.12        # adaptateur PostgreSQL (production sur Render/Heroku)
+# SQLite est inclus dans Python — aucun package supplémentaire requis pour le développement
+
+
+# ── FICHIERS MÉDIAS / IMAGES ──────────────────────────────────────────────────
+pillow==12.2.0                 # traitement d'images (ImageField Django, redimensionnement, etc.)
+
+
+# ── OCR ET VISION ──────────────────────────────────────────────────────────────
+# extraction des informations depuis les pièces d'identité / certificats de
+# patente (Registration/services/ocr_service.py, étape 02 de soumettre_verification)
+paddleocr==2.9.1                   # OCR (détection + reconnaissance de texte)
+paddlepaddle==2.6.2                # moteur de deep learning requis par PaddleOCR
+opencv-python-headless==4.10.0.84  # traitement d'image (dépendance de PaddleOCR, sans libs GUI)
+PyMuPDF==1.24.10                   # module "fitz" : lecture des PDF par PaddleOCR (certificat de
+                                    # patente entreprise, qui accepte un PDF — voir check_and_read
+                                    # dans paddleocr/ppocr/utils/utility.py) ; sans ce paquet,
+                                    # extraire_infos_piece() lève ImportError sur tout PDF soumis
+protobuf==3.20.2                   # épinglé explicitement : sans ça, une résolution de dépendances
+                                    # future (ex. mise à jour d'un autre package) peut remonter
+                                    # protobuf à une version récente et casser `import paddle`
+# La vérification faciale (étape 04, Registration/services/face_service.py) tourne
+# dans un environnement Python SÉPARÉ (deepface/tensorflow, voir requirements-face.txt)
+# — protobuf>=6.31.1 y est requis, incompatible avec paddlepaddle ci-dessus
+# (protobuf<=3.20.2) dans le même environnement (vérifié : import paddle échoue sinon).
+
+
+
+# ── GÉNÉRATION DE DOCUMENTS (PDF) ──────────────────────────────────────────────
+# contrat vendeur signé électroniquement, généré quand une demande de
+# vérification est validée (Registration/services/contrat_service.py)
+reportlab==4.2.5                   # génération de PDF (reportlab.platypus)
+
+
+# ── GÉOLOCALISATION ────────────────────────────────────────────────────────────
+geopy==2.4.1                   # calcul de distances GPS entre deux coordonnées (models.py)
+geographiclib==2.1             # bibliothèque mathématique géodésique (dépendance de geopy)
+
+
+# ── HTTP / REQUÊTES EXTERNES ───────────────────────────────────────────────────
+requests==2.34.2               # appels HTTP vers l'API Google OAuth2 (views.py) + OpenRouter (Messagerie/services/chatbot_ia_service.py)
+urllib3==2.7.0                 # client HTTP bas niveau (dépendance de requests)
+certifi==2026.5.20             # certificats CA pour les connexions HTTPS
+charset-normalizer==3.4.7      # détection de l'encodage des réponses HTTP (dépendance de requests)
+idna==3.18                     # gestion des noms de domaine internationalisés (dépendance de requests)
+
+
+# ── IA / CHATBOT (voir Messagerie/services/chatbot_ia_service.py) ─────────────
+google-genai==2.18.1           # SDK Gemini (Google AI Studio) — fournisseur de secours du chatbot IA, utilisé quand OpenRouter est indisponible ou à quota
+
+
+# ── SÉCURITÉ / CRYPTOGRAPHIE ──────────────────────────────────────────────────
+cryptography==48.0.0           # opérations cryptographiques (dépendance de social-auth) + chiffrement des sauvegardes (Sauvegarde/services/chiffrement_service.py)
+cffi==2.0.0                    # interface Python → C (dépendance de cryptography)
+pycparser==3.0                 # parseur C en Python (dépendance de cffi)
+
+
+# ── SAUVEGARDES (PLANIFICATION + GOOGLE DRIVE) ────────────────────────────────
+APScheduler==3.11.3            # planificateur en mémoire (fréquence quotidienne/hebdo/mensuelle des sauvegardes, voir Sauvegarde/apps.py)
+# volontairement PAS google-api-python-client : tire google-api-core (protobuf
+# récent), incompatible avec paddlepaddle==2.6.2 ci-dessus (protobuf<=3.20.2,
+# vérifié à l'installation — voir aussi la note sur requirements-face.txt) ;
+# Sauvegarde/services/google_drive_service.py appelle l'API REST Drive v3
+# directement via `requests` (déjà listé plus haut), google-auth ne fournit
+# que le flux OAuth2 (autorisation + rafraîchissement de token)
+google-auth==2.56.3            # objets Credentials + rafraîchissement de token OAuth2 pour Google Drive
+google-auth-oauthlib==1.4.0    # construit l'URL de consentement OAuth2 (google_auth_oauthlib.flow.Flow)
+
+
+# ── CONFIGURATION / ENVIRONNEMENT ─────────────────────────────────────────────
+python-dotenv==1.2.2           # charge les variables d'environnement depuis le fichier .env
+
+
+# ── DONNÉES / UTILITAIRES ─────────────────────────────────────────────────────
+python-dateutil==2.9.0.post0   # manipulation avancée des dates (dépendance de pandas)
+six==1.17.0                    # compatibilité Python 2/3 (dépendance legacy de certaines libs)
+PyYAML==6.0.3                  # parsing YAML (dépendance de social-auth-core)
+tzdata==2026.1                 # base de données des fuseaux horaires (requis sur Windows/Docker)
+colorama==0.4.6                # couleurs dans le terminal sur Windows (dépendance de click/uvicorn)
+click==8.4.1                   # parsing d'arguments CLI (dépendance de uvicorn)
+
+
+# ── ANALYSE DE DONNÉES (optionnel) ────────────────────────────────────────────
+# numpy<2.0 : paddleocr==2.9.1 (voir section OCR ET VISION) plante au chargement
+# avec numpy 2.x (AttributeError: np.sctypes was removed in the NumPy 2.0
+# release), via sa dépendance imgaug — vérifié à l'installation. 1.26.4 reste
+# compatible avec pandas==3.0.3 (qui accepte numpy>=1.26.0).
+numpy==1.26.4                  # calculs numériques (dépendance de pandas ET de paddleocr)
+pandas==3.0.3                  # manipulation de données tabulaires (rapports / exports futurs)
+
+
+# ── TESTS / COUVERTURE ────────────────────────────────────────────────────────
+coverage==7.14.1               # mesure la couverture de code lors des tests (python -m coverage run)

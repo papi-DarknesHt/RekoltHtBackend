@@ -1,0 +1,203 @@
+import json
+
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+
+from Registration.models import verifier_droit_admin, enregistrer_audit
+from ..models import Categories
+from ._auth import _get_user_from_token
+
+
+def _serialiseCategorie(categorie):
+    return {
+        'id':          categorie.id,
+        'nom':         categorie.nom,       # français — champ canonique, toujours rempli
+        'nom_ht':      categorie.nom_ht,    # optionnel — vide si pas encore traduit (voir modèle)
+        'nom_en':      categorie.nom_en,    # idem
+        'description': categorie.description,
+    }
+
+
+# ── LISTER LES CATÉGORIES (public) ────────────────────────────────────────────
+@csrf_exempt
+def listerCategories(request):
+    """Liste toutes les catégories — public, utilisé pour peupler filtres/formulaires."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    categories = Categories.objects.all()
+
+    return JsonResponse({
+        'categories': [_serialiseCategorie(c) for c in categories],
+    }, status=200)
+
+
+# ── CRÉER UNE CATÉGORIE (admin) ───────────────────────────────────────────────
+@csrf_exempt
+def creerCategorie(request):
+    """Crée une catégorie (accès réservé au rôle admin)."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'nom' not in data:
+        return JsonResponse({'error': 'Le champ nom est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'nom'}}, status=400)
+
+    categorie = Categories.objects.create(
+        nom         = data['nom'],
+        nom_ht      = data.get('nom_ht', ''),
+        nom_en      = data.get('nom_en', ''),
+        description = data.get('description', ''),
+    )
+    enregistrer_audit(utilisateur, 'categorie.creer', f"A créé la catégorie « {categorie.nom} » (id {categorie.id})")
+
+    return JsonResponse({
+        'message':   'Catégorie créée avec succès',
+        'categorie': _serialiseCategorie(categorie),
+    }, status=201)
+
+
+# ── MODIFIER UNE CATÉGORIE (admin) ────────────────────────────────────────────
+@csrf_exempt
+def modifierCategorie(request):
+    """Met à jour une catégorie (accès réservé au rôle admin)."""
+    if request.method != 'PUT':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    try:
+        categorie = Categories.objects.get(id=data['id'])
+    except Categories.DoesNotExist:
+        return JsonResponse({'error': 'Catégorie introuvable', 'error_code': 'CATEGORY_NOT_FOUND'}, status=404)
+
+    for champ in ['nom', 'nom_ht', 'nom_en', 'description']:
+        if champ in data:
+            setattr(categorie, champ, data[champ])
+    categorie.save()
+    enregistrer_audit(utilisateur, 'categorie.modifier', f"A modifié la catégorie « {categorie.nom} » (id {categorie.id})")
+
+    return JsonResponse({
+        'message':   'Catégorie mise à jour avec succès',
+        'categorie': _serialiseCategorie(categorie),
+    }, status=200)
+
+
+# ── SUPPRIMER UNE CATÉGORIE (admin) ───────────────────────────────────────────
+@csrf_exempt
+def supprimerCategorie(request):
+    """Supprime une catégorie (accès réservé au rôle admin)."""
+    if request.method != 'DELETE':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if not verifier_droit_admin(utilisateur, 'gestion_categories'):
+        return JsonResponse({'error': "Ce droit administrateur est requis", 'error_code': 'DROIT_REQUIS', 'error_params': {'droit': 'gestion_categories'}}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    if 'id' not in data:
+        return JsonResponse({'error': 'Le champ id est requis', 'error_code': 'FIELD_REQUIRED', 'error_params': {'champ': 'id'}}, status=400)
+
+    try:
+        categorie = Categories.objects.get(id=data['id'])
+    except Categories.DoesNotExist:
+        return JsonResponse({'error': 'Catégorie introuvable', 'error_code': 'CATEGORY_NOT_FOUND'}, status=404)
+
+    nom_categorie = categorie.nom
+    categorie.delete()
+    enregistrer_audit(utilisateur, 'categorie.supprimer', f"A supprimé la catégorie « {nom_categorie} »")
+
+    return JsonResponse({'message': 'Catégorie supprimée avec succès'}, status=200)
+
+
+# ── CHOISIR SES CATÉGORIES (vendeur) ──────────────────────────────────────────
+@csrf_exempt
+def choisirCategoriesVendeur(request):
+    """
+    Définit les catégories de produits que le vendeur souhaite publier —
+    étape obligatoire après validation de la vérification KYC (voir
+    DemandeVerification.marquer_verifie, Registration/models.py) : creerProduit
+    (Produits/views/produitsViews.py) refuse toute création tant qu'aucune
+    catégorie n'est choisie. Remplace entièrement la sélection précédente
+    (pas d'ajout incrémental) — même logique que modifierProduit pour la
+    simplicité côté frontend (un seul écran de sélection à re-soumettre).
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    if utilisateur.profil.role != 'vendeur':
+        return JsonResponse({'error': "Accès réservé aux vendeurs", 'error_code': 'VENDEUR_ONLY'}, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Corps de requête JSON invalide', 'error_code': 'INVALID_JSON_BODY'}, status=400)
+
+    categorie_ids = data.get('categorie_ids')
+    if not categorie_ids or not isinstance(categorie_ids, list):
+        return JsonResponse({'error': "Le champ categorie_ids (liste non vide) est requis"}, status=400)
+
+    categories = Categories.objects.filter(id__in=categorie_ids)
+    if categories.count() != len(set(categorie_ids)):
+        return JsonResponse({'error': "Une ou plusieurs catégories sont introuvables"}, status=404)
+
+    utilisateur.profil.categories_produits.set(categories)
+
+    return JsonResponse({
+        'message':    'Catégories mises à jour avec succès',
+        'categories': [_serialiseCategorie(c) for c in categories],
+    }, status=200)
+
+
+# ── LISTER MES CATÉGORIES (vendeur connecté) ──────────────────────────────────
+@csrf_exempt
+def mesCategoriesVendeur(request):
+    """Retourne les catégories déjà choisies par le vendeur connecté (pour que
+    le frontend sache s'il doit afficher l'écran de sélection obligatoire)."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Méthode non autorisée', 'error_code': 'METHOD_NOT_ALLOWED'}, status=405)
+
+    utilisateur = _get_user_from_token(request)
+    if not utilisateur:
+        return JsonResponse({'error': "Token d'authentification requis", 'error_code': 'AUTH_TOKEN_REQUIRED'}, status=401)
+
+    categories = utilisateur.profil.categories_produits.all()
+
+    return JsonResponse({
+        'categories': [_serialiseCategorie(c) for c in categories],
+    }, status=200)
